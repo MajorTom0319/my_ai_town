@@ -11,10 +11,19 @@ import { isTouch, onBack } from '../platform'
 import './connect.css'
 
 /** 填个密钥就能用的服务（有默认模型），前四个先列出来，其余点「更多」 */
-export const QUICK = ['deepseek', 'kimi', 'zhipu-glm', 'minimax', 'alibaba-bailian', 'xiaomi-mimo']
+export const QUICK = [
+  'maas-deepseek',
+  'deepseek',
+  'kimi',
+  'zhipu-glm',
+  'minimax',
+  'alibaba-bailian',
+  'xiaomi-mimo',
+]
 const FIRST = 4
 /** 申请密钥的地方：只给到平台首页，路径变了也打得开 */
 export const SIGN_UP: Record<string, string> = {
+  'maas-deepseek': 'https://maas.cloud.mgtv.com/keys',
   deepseek: 'https://platform.deepseek.com',
   kimi: 'https://platform.moonshot.cn',
   'zhipu-glm': 'https://open.bigmodel.cn',

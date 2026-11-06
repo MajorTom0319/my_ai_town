@@ -13,6 +13,15 @@ export interface ProviderPreset {
 
 export const PRESETS: ProviderPreset[] = [
   {
+    // MAAS 适配器：OpenAI 兼容端点，模型要用 /v1/models 返回的完整 ID
+    id: 'maas-deepseek',
+    name: 'MAAS DeepSeek',
+    baseUrl: 'https://maas-codex-adapter.cloud.imgo.tv/v1',
+    needsKey: true,
+    models: ['maas-deepseek/deepseek-v4-1-flash'],
+    defaultModel: 'maas-deepseek/deepseek-v4-1-flash',
+  },
+  {
     id: 'deepseek',
     name: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com',

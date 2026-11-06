@@ -38,7 +38,7 @@ const STATUS_TEXT: Record<ProviderStatus, string> = {
 interface ProviderListDeps extends PageDeps {
   /** 用这个服务商的村民名字；还不知道时给空表 */
   usersOf(providerId: string): string[]
-  /** 已配置数变了：目录上的「n / 13」跟着改 */
+  /** 已配置数变了：目录上的已配置数跟着改 */
   onConfigured(count: number, total: number): void
 }
 

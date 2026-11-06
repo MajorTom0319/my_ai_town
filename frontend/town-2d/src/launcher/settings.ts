@@ -213,7 +213,8 @@ export function installHomeSettings(deps: { music: { enabled(): boolean; toggle(
           conf?.key_mask ? `已连接 · 密钥 ${conf.key_mask}` : p.defaultModel,
           button(conf?.key_mask ? '更换密钥' : '连接', () => void connect(p.id))
         )
-        if (p.id === 'deepseek') row.querySelector('.set-row-label')?.append(chip('推荐'))
+        const recommended = p.id === 'maas-deepseek' || p.id === 'deepseek'
+        if (recommended) row.querySelector('.set-row-label')?.append(chip('推荐'))
         if (conf?.key_mask) row.classList.add('connected')
         return row
       })
