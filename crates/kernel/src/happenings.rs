@@ -5,7 +5,6 @@ use crate::props::{Instance, InstantEffect, Placement, ScheduledProp};
 use crate::World;
 use protocol::{At, EventInfo};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// 随机流的起点；旧存档没有随机流时也从这里开始。
 const DICE_SEED: u32 = 0x9E37_79B9;
@@ -58,7 +57,7 @@ pub enum What {
 
 impl Happenings {
     /// 掷一次百分比；`percent` 已校验在 1–99。
-    fn roll(&mut self, percent: u32) -> bool {
+    pub(crate) fn roll(&mut self, percent: u32) -> bool {
         let mut s = self.dice;
         s ^= s << 13;
         s ^= s >> 17;
@@ -83,9 +82,11 @@ impl Happenings {
 }
 
 impl World {
-    /// 概率效果先掷定，展开成实际发生的效果；没发生的写进 misses。
+    /// 概率效果先掷定，展开成实际发生的效果；没发生的写进 misses。`actor` 随身带着概率写明的工具时
+    /// 按带工具的概率掷。
     pub(crate) fn roll_effects(
         &mut self,
+        actor: &str,
         effects: &[InstantEffect],
     ) -> (Vec<InstantEffect>, Vec<String>) {
         let mut happened = Vec::new();
@@ -96,8 +97,13 @@ impl World {
                     percent,
                     effects,
                     miss,
+                    boost,
                 } => {
-                    if self.happenings.roll(*percent) {
+                    let percent = match boost {
+                        Some(b) if !self.carried_of(actor, &b.item).is_empty() => b.percent,
+                        _ => *percent,
+                    };
+                    if self.happenings.roll(percent) {
                         happened.extend(effects.iter().cloned());
                     } else {
                         misses.push(if miss.trim().is_empty() {
@@ -196,10 +202,12 @@ impl World {
     fn fire_event(&mut self, key: &str, text: &str, locale: &str, place: Option<ScheduledProp>) {
         if let Some(p) = place {
             let at = p.locale.clone().unwrap_or_else(|| locale.to_string());
-            let id = format!(
-                "event:{key}-{:x}",
-                Sha256::digest(format!("{key}/{}", self.minutes.to_bits()))
-            );
+            // 编号里的哈希取短的一段（props::short_hash），村民看得见、要拿来用
+            let hash =
+                crate::props::short_hash(&format!("{key}/{}", self.minutes.to_bits()), |h| {
+                    self.prop_id_taken(&format!("event:{key}-{h}"))
+                });
+            let id = format!("event:{key}-{hash}");
             let placement = Placement {
                 instance: Instance {
                     id: id.clone(),

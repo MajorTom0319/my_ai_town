@@ -1,11 +1,14 @@
 import { WeatherLayer } from './weather'
-import type { ServerMsg } from 'town-shared/protocol'
+import type { PlaceGrid, ServerMsg } from 'town-shared/protocol'
 import { heightAt, position as spatialPosition, type Spatial } from 'town-shared/spatial'
 import { savedAppearance, defaultAppearance } from 'town-shared/props/appearances'
 import type { Appearance, PropCatalog, PropView } from 'town-shared/props/types'
 import type { Atlas, Topology } from 'town-shared/mapDocument'
 import type {
   AvatarPrompt,
+  CameraShot,
+  DirectorCamera,
+  PlaceGhost,
   PlaceSpot,
   ResidentEntry,
   ScreenBox,
@@ -22,13 +25,15 @@ import { cueOf } from './map/hd2d/villagerCues'
 import { AvatarMotion } from './map/avatarMotion'
 import { PropPositions } from './map/propPositions'
 import { RoomCovers, RoomPeek } from './map/rooms'
-import { MapCamera, type CameraArea } from './map/camera'
+import { MapCamera, type CameraArea, type Cover } from './map/camera'
 import { DEFAULT_PITCH, PITCH_MAX } from './map/hd2d/layout'
 import { standUpright, uprightRatio } from './map/upright'
 import { ThoughtBubbles } from './map/bubbles'
 import { ResidentLayer } from './map/residents'
 import { PromptLayer } from './map/prompts'
 import { propArtwork } from './map/propArt'
+import { PlaceOverlay, type OverlayProp } from './map/placeOverlay'
+import { cellNear, freeNear } from 'town-shared/props/placeGrid'
 
 /** 开发版：地址里的 ?clock=18:30&weather=rain 只替换立体场景用的时间和天气，世界本身不变。
  *  画面改动前后按同一时刻、同一天气截图对比用；正式包里没有这段 */
@@ -47,6 +52,15 @@ import { village, type MapTheme } from './map/themes'
 import { el } from 'town-shared/svg'
 import type { DepthBlur, Quality } from 'town-shared/quality'
 // 地图装配：静态图层、人物/气泡、镜头各自拥有状态；公共观察接口保持不变。
+
+/** 跟随中一帧里人挪了这么远（地图单位）算瞬移（进门出门、换地点，立牌也是直接放过去）：镜头慢慢挪过去 */
+const WATCH_JUMP = 400
+/** 隔了这么久（毫秒）才又画一帧，不按这段间隔追：人站着时场景不重画，一起步就是很久以后的一帧 */
+const WATCH_STALE_MS = 250
+/** 摆道具的格子一格至少这么多屏幕像素才画出来；再小就是一片噪点，只留遮罩 */
+const PLACE_DETAIL_PIXELS = 8
+/** 拉近到地点时，一米至少这么多屏幕像素（一格 0.4 米约 12 像素）；地点太大装不下时只取点的那一块 */
+const PLACE_FOCUS_PIXELS_PER_METRE = 30
 
 export interface TownMapOptions {
   atlas: Atlas
@@ -148,6 +162,14 @@ export class TownMap {
   private placeAt: WalkTarget | null = null
   private readonly placeOutline = el('path', { class: 'place-outline' })
   private readonly placeMarker = el('g', { class: 'place-marker' })
+  /** 摆道具的叠层（有三维数据的地图才有）：遮罩、格子、绿框；格子是后端按地点给的 */
+  private readonly placeOverlay?: PlaceOverlay
+  private placeGrids = new Map<string, PlaceGrid>()
+  private placeGhost: PlaceGhost | null = null
+  /** 上次画叠层时的方位（投影一个点的结果）：方位角变了要重画 */
+  private placeYawKey = ''
+  private placeDetailOn = false
+  onPlaceDetail: ((detail: boolean) => void) | null = null
   /** 平面图上各区域占的格子，第一次摆道具时才建 */
   private cellsOfRegions?: Map<string, { size: number; cells: Set<string> }>
   private get regionCells() {
@@ -245,9 +267,110 @@ export class TownMap {
   /** 立体场景每次画之前调（镜头跟随）：返回这一帧挪了镜头。没有立体场景时返回 false，调用方自己逐帧跑 */
   private frameHook: ((t: number) => boolean) | null = null
   setFrameHook(hook: ((t: number) => boolean) | null): boolean {
-    this.frameHook = hook
-    if (this.hd) this.hd.beforeDraw = hook ?? undefined
+    if (hook !== this.frameHook) {
+      this.frameHook = hook
+      // 化身接手或交还镜头：跟随中的村民再接手时，先慢慢挪回他身上
+      if (this.watched) {
+        this.watched.recentre = true
+        this.watched.last = null
+      }
+      if (!hook) this.startWatchLoop()
+    }
     return !!this.hd
+  }
+  /** 立体场景每次画之前：重演拍素材时镜头归导演管（见 director），控制化身时归化身管，
+   *  不然跟着「跟随中」的村民 */
+  private beforeFrame(t: number): boolean {
+    if (this.directorHook) return this.directorHook(t)
+    return this.frameHook ? this.frameHook(t) : this.followWatched(t)
+  }
+  private directorHook: ((t: number) => boolean) | null = null
+
+  /** 「跟随中」的村民（见 watch） */
+  private watched: {
+    id: string
+    onStop?: () => void
+    /** 上一帧人画在哪、是什么时刻 */
+    last: { t: number; p: [number, number] } | null
+    /** 下一帧先慢慢挪回正中间：刚开始跟、刚从整图放大回来、化身交还镜头以后 */
+    recentre: boolean
+  } | null = null
+  /** 没有立体场景（还在加载、退回了平面图）时，跟随自己逐帧跑 */
+  private watchLoop = 0
+  /** 化身给的缩放不动点（见 setZoomAnchor） */
+  private externalAnchor: (() => [number, number] | undefined) | null = null
+
+  /** 「跟随中」：镜头每帧锁住这位村民，人始终在露出来那块的正中间（见 followWatched）；null 停止。
+   *  玩家拖动地图时停止跟随并调 onStop */
+  watch(id: string | null, onStop?: () => void) {
+    if (!id) return this.stopWatching(false)
+    if (this.watched?.id === id) {
+      this.watched.onStop = onStop
+      return
+    }
+    this.watched = { id, onStop, last: null, recentre: true }
+    this.startWatchLoop()
+  }
+  private stopWatching(byUser: boolean) {
+    const w = this.watched
+    if (!w) return
+    this.watched = null
+    cancelAnimationFrame(this.watchLoop)
+    this.watchLoop = 0
+    if (byUser) w.onStop?.()
+  }
+  /** 跟随要动起来了：立体场景马上画一帧（每次画之前跟一帧）；没有立体场景时自己逐帧跑 */
+  private startWatchLoop() {
+    if (!this.watched) return
+    if (this.hd) return this.hd.requestDraw()
+    if (this.watchLoop) return
+    const loop = (t: number) => {
+      this.watchLoop = 0
+      if (!this.watched || this.hd || this.disposed) return
+      this.watchLoop = requestAnimationFrame(loop)
+      if (!this.frameHook && !document.hidden) this.followWatched(t)
+    }
+    this.watchLoop = requestAnimationFrame(loop)
+  }
+  /** 跟随中的一帧：镜头锁住这个人（见 MapCamera.follow 的 lock），对准身子中间。人一下子挪很远
+   *  （进门、出门）、刚开始跟时先慢慢挪回正中间，离得比一屏还远时直接切。返回这一帧挪了镜头 */
+  private followWatched(t: number): boolean {
+    const w = this.watched
+    if (!w) return false
+    const p = this.getDrawnPos(w.id)
+    if (!p) {
+      w.last = null
+      return false
+    }
+    const last = w.last
+    w.last = { t, p }
+    // 看全貌时不跟；放大回来以后先挪回人身上
+    if (this.camera.showingWhole) {
+      w.recentre = true
+      return false
+    }
+    const jumped = !!last && Math.hypot(p[0] - last.p[0], p[1] - last.p[1]) > WATCH_JUMP
+    const how = jumped || w.recentre ? 'centre' : 'lock'
+    w.recentre = false
+    // 隔了很久才又画（人站着时场景不重画、页面切走过）：这一帧不按间隔追，下一帧接着平滑地跟
+    const dt = !last || t - last.t > WATCH_STALE_MS ? 0 : Math.min(100, t - last.t)
+    return this.camera.follow(p[0], p[1], dt, how, {
+      rise: this.watchRise(),
+      velocity: this.hd?.villagerVelocity(w.id) ?? [0, 0],
+    })
+  }
+  /** 对准人脚下往上多高（立着量的地图单位）：立牌或头像标记高度的一半，人整个在画面正中 */
+  private watchRise() {
+    return (this.hd ? VILLAGER_HEIGHT : 108 * this.markerScale) / 2
+  }
+  /** 跟随中缩放的不动点：对准的那一点（人身子中间）此刻在屏幕上的位置；控制化身时不管 */
+  private watchAnchor(): [number, number] | undefined {
+    const w = this.watched
+    if (!w || this.frameHook) return
+    const p = this.getScreenPos(w.id),
+      m = this.svg.getScreenCTM()
+    if (!p || !m) return
+    return [p[0], p[1] - this.watchRise() * Math.abs(m.a)]
   }
   /** 下一帧就画（不等节拍）：镜头要开始挪了之类 */
   requestFrame() {
@@ -334,7 +457,8 @@ export class TownMap {
       this.bubbles,
       this.metre,
       (id) => localeNames.get(id) ?? id,
-      (id) => this.onVillagerClick?.(id)
+      (id) => this.onVillagerClick?.(id),
+      (locale) => this.roomOf(locale)
     )
     this.destination.append(
       el('circle', { class: 'avatar-destination-halo', r: 44 }),
@@ -348,7 +472,9 @@ export class TownMap {
       el('circle', { class: 'place-marker-dot', r: 12 })
     )
     this.placeMarker.style.display = 'none'
+    if (options.spatial) this.placeOverlay = new PlaceOverlay(options.spatial.svg_units_per_metre)
     this.svg.append(
+      ...(this.placeOverlay ? [this.placeOverlay.layer] : []),
       this.placeOutline,
       this.residents.layer,
       this.destination,
@@ -402,6 +528,9 @@ export class TownMap {
         if (this.hd) this.hd.setPitch(this.hd.pitch + dy * 0.2)
       }
     )
+    // 化身给的不动点优先；不然跟随中的村民就是缩放的不动点。拖动地图就不再跟随
+    this.camera.zoomAnchor = () => this.externalAnchor?.() ?? this.watchAnchor()
+    this.camera.onDragPan = () => this.stopWatching(true)
     // 控制化身时指针下附近都走不到就换成禁止的指针；每帧最多算一次
     let hover: { client: [number, number]; target: EventTarget | null } | null = null
     this.svg.addEventListener('pointermove', (e) => {
@@ -465,7 +594,8 @@ export class TownMap {
         }
         this.hd.onTilt = () => this.applyTilt()
         this.hd.onVillagersMoved = () => this.followVillagers()
-        this.hd.beforeDraw = this.frameHook ?? undefined
+        this.hd.beforeDraw = (t) => this.beforeFrame(t)
+        if (this.watched) this.hd.requestDraw()
         this.hd.setLiveMotion(this.liveMotion())
         this.hd.onNotice = (text) => this.onRenderNotice?.(text)
         this.hd.setPickedVillager(this.selectedId, this.hoveredId)
@@ -612,10 +742,13 @@ export class TownMap {
     const changed = this.rooms.update(
       [
         this.selectedId ? this.residents.getMemberAnchor(this.selectedId) : undefined,
+        // 重演拍素材时景深对准的人：和选中一样掀开他所在的屋子（重演不选人，画面中心又常落在屋外）
+        this.directorFocus ? this.residents.getMemberAnchor(this.directorFocus) : undefined,
         avatar && this.residents.getMemberAnchor(avatar.member.id),
         w ? this.camera.unproject([x + w / 2, y + h / 2]) : undefined,
       ],
-      [this.peek.peeked, this.peek.pinned]
+      // 摆道具时屋顶全掀开：屋里能放东西的地面和外面的空地一起亮出来
+      [this.peek.peeked, this.peek.pinned, ...(this.placing ? hd.houses.map((h) => h.id) : [])]
     )
     const covered = this.rooms.covered
     this.residents.setCovered(covered)
@@ -717,6 +850,15 @@ export class TownMap {
   /** SVG 单位每米；没有三维数据时人物位置直接来自平面图集，不需要换算 */
   private get metre(): number | undefined {
     return this.spatial?.svg_units_per_metre
+  }
+
+  /** 地点能站人的范围和立着的道具（米）：同一点上的几个人往这块地面里排开、避开道具 */
+  private roomOf(locale: string) {
+    const rect = this.spatial?.floors?.find((f) => f.id === locale)?.bounds
+    const unit = this.metre
+    if (!rect || !unit) return undefined
+    const props = this.routeMarks.map(({ at }): [number, number] => [at[0] / unit, at[1] / unit])
+    return { rect, props }
   }
 
   private positionOf(locale: string, at: ResidentEntry['member']['at']) {
@@ -829,8 +971,26 @@ export class TownMap {
       const rise = open
         ? house.y - hd.roomTop(house)
         : house.y + (house.alongX ? house.h / 2 : 0) - hd.roofTop(house)
-      const outline = hull([...foot, ...foot.map(([x, y]) => [x, y - rise] as [number, number])])
-      if (!inside(outline, [vx, vy])) continue
+      const lift = (points: [number, number][], by: number) =>
+        hull([...points, ...points.map(([x, y]) => [x, y - by] as [number, number])])
+      // 灯塔是矮石台加一根细高的塔，分开算：塔两边的空当不算点在灯塔上
+      const tower = open ? undefined : house.tower
+      const column = (r: number) =>
+        (
+          [
+            [-r, -r],
+            [r, -r],
+            [r, r],
+            [-r, r],
+          ] as [number, number][]
+        ).map(([dx, dy]) => this.camera.project([centre[0] + dx, centre[1] + dy]))
+      const outlines = tower
+        ? [
+            lift(foot, hd.rise(tower.parapet)),
+            lift(column(tower.reach), centre[1] - hd.roofTop(house)),
+          ]
+        : [lift(foot, rise)]
+      if (!outlines.some((o) => inside(o, [vx, vy]))) continue
       if (open && !floor && inside(foot, [vx, vy])) continue
       const front = Math.max(...foot.map((p) => p[1]))
       if (!best || front > best.front) best = { id: house.id, front }
@@ -906,6 +1066,16 @@ export class TownMap {
   private placeDestination() {
     this.pin(this.destination, this.destinationAt)
     this.pin(this.placeMarker, this.placeAt)
+    if (this.placing && this.placeOverlay) {
+      if (this.camera.project([1, 0]).join() !== this.placeYawKey) this.drawPlaceOverlay()
+      const detail = this.placeCellPixels() >= PLACE_DETAIL_PIXELS
+      if (detail !== this.placeDetailOn) {
+        this.placeDetailOn = detail
+        this.placeOverlay.setDetail(detail)
+        this.onPlaceDetail?.(detail)
+      }
+      this.placeOverlay.setVisible(detail ? this.placesInView() : [])
+    }
     this.placeOutline.setAttribute(
       'd',
       (this.placeLocale ? this.outlineOf(this.placeLocale) : [])
@@ -929,12 +1099,155 @@ export class TownMap {
   setPlacing(placing: boolean) {
     this.placing = placing
     this.svg.classList.toggle('placing', placing)
-    if (!placing) this.placeLocale = this.placeAt = null
+    // 有遮罩时不再整张压暗（见 placing.css）
+    this.svg.parentElement?.classList.toggle('place-masked', placing && !!this.placeOverlay)
+    if (!placing) {
+      this.placeLocale = this.placeAt = this.placeGhost = null
+      this.placeGrids = new Map()
+      this.placeDetailOn = false
+      this.placeOverlay?.setDetail(false)
+    }
+    this.placeOverlay?.show(placing)
+    this.drawPlaceOverlay()
     this.placeDestination()
+    this.refreshRooms()
   }
   setPlaceHighlight(locale: string | null) {
     this.placeLocale = locale
+    this.syncPlaceHot()
     this.placeDestination()
+  }
+  setPlaceGrids(grids: PlaceGrid[] | null) {
+    this.placeGrids = new Map((grids ?? []).map((g) => [g.locale, g]))
+    this.drawPlaceOverlay()
+    this.placeDestination()
+  }
+  setPlaceGhost(ghost: PlaceGhost | null) {
+    this.placeGhost = ghost
+    this.syncPlaceGhost()
+  }
+  placeDetail() {
+    return this.placeDetailOn
+  }
+  /** 摆道具叠层的地点和格子；换了格子、方位角时重画 */
+  private drawPlaceOverlay() {
+    const overlay = this.placeOverlay
+    if (!overlay || !this.placing || !this.spatial) return
+    const floors = (this.spatial.floors ?? []).filter((f) => this.isDwell(f.id))
+    overlay.setPlaces(floors, this.placeGrids, this.camera.project)
+    this.placeYawKey = this.camera.project([1, 0]).join()
+    this.syncPlaceHot()
+    this.syncPlaceGhost()
+  }
+  private syncPlaceHot() {
+    const locale = this.placeLocale
+    this.placeOverlay?.setHot(locale, locale ? this.hiddenWalks(locale) : [])
+  }
+  private syncPlaceGhost() {
+    const ghost = this.placeGhost
+    this.placeOverlay?.setGhost(
+      ghost,
+      ghost?.blockedBy ? this.propFootprint(ghost.blockedBy) : null
+    )
+  }
+  /** 地点里看不见的路（米）：运行时放的道具从入口过去的路、屋里的路。地上的小路本来就画着 */
+  private hiddenWalks(locale: string): [number, number][][] {
+    const s = this.spatial
+    const b = s?.floors?.find((f) => f.id === locale)?.bounds
+    if (!s || !b) return []
+    const inside = (p: number[]) =>
+      p[0] >= b.x && p[0] <= b.x + b.w && p[2] >= b.y && p[2] <= b.y + b.h
+    return [
+      ...(this.runtimeSpatial?.overrides ?? [])
+        .filter((o) => o.prop.locale === locale)
+        .map((o) => o.route.points),
+      ...s.routes.filter((r) => r.indoor && r.points.some(inside)).map((r) => r.points),
+    ].map((points) => points.map((p) => [p[0], p[2]] as [number, number]))
+  }
+  /** 一件道具的占地（米），描红挡路的那件用 */
+  private propFootprint(id: string): OverlayProp | null {
+    const p =
+      this.runtimeSpatial?.overrides.find((o) => o.prop.id === id)?.prop ??
+      this.spatial?.props.find((q) => q.id === id)
+    return p ? { position: [p.position[0], p.position[2]], footprint: p.footprint } : null
+  }
+  private isDwell(id: string) {
+    return this.topology.locales.some((l) => l.id === id && l.kind === 'dwell')
+  }
+  /** 镜头里看得见（哪怕一角）的、有格子的地点 */
+  private placesInView() {
+    const [vx, vy, vw, vh] = this.camera.getViewBox()
+    const unit = this.spatial?.svg_units_per_metre ?? 1
+    return (this.spatial?.floors ?? [])
+      .filter(({ id, bounds: b }) => {
+        if (!this.placeGrids.has(id)) return false
+        const corners = [
+          [b.x, b.y],
+          [b.x + b.w, b.y],
+          [b.x, b.y + b.h],
+          [b.x + b.w, b.y + b.h],
+        ].map(([x, y]) => this.camera.project([x * unit, y * unit]))
+        const xs = corners.map((p) => p[0]),
+          ys = corners.map((p) => p[1])
+        return (
+          Math.max(...xs) >= vx &&
+          Math.min(...xs) <= vx + vw &&
+          Math.max(...ys) >= vy &&
+          Math.min(...ys) <= vy + vh
+        )
+      })
+      .map((f) => f.id)
+  }
+  /** 格子的一格此刻在屏幕上多宽（CSS 像素） */
+  private placeCellPixels() {
+    const step = this.placeGrids.values().next().value?.step ?? 0.4
+    const unit = this.spatial?.svg_units_per_metre ?? 1
+    return step * unit * Math.abs(this.svg.getScreenCTM()?.a || 0)
+  }
+  focusPlace(locale: string, at?: WalkTarget, avoid: Cover = {}, gentle = false) {
+    const s = this.spatial
+    const b = s?.floors?.find((f) => f.id === locale)?.bounds
+    if (!s || !b) {
+      // 地点没有可放置范围（路上、平面图）：只把这一点挪到露出来的那块中间
+      if (at) this.camera.lookAt(...this.walkPoint(at))
+      return
+    }
+    if (gentle && this.placeDetailOn && at && this.inOpenArea(this.walkPoint(at), avoid)) return
+    const unit = s.svg_units_per_metre
+    const box = this.svg.getBoundingClientRect()
+    const insets = this.viewInsets ?? { top: 0, right: 0, bottom: 0, left: 0 }
+    const open = Math.min(
+      box.width - insets.left - insets.right - (avoid.right ?? 0),
+      box.height - insets.top - insets.bottom - (avoid.top ?? 0) - (avoid.bottom ?? 0)
+    )
+    // 地点连同四周留一圈装进露出来的那块；地点太大、格子会看不清时只取点的那一块
+    const pad = 2
+    const most = Math.max(8, open / PLACE_FOCUS_PIXELS_PER_METRE)
+    let [x, y, w, h] = [b.x - pad, b.y - pad, b.w + 2 * pad, b.h + 2 * pad]
+    if (at && (w > most || h > most)) {
+      w = Math.min(w, most)
+      h = Math.min(h, most)
+      x = Math.min(Math.max(at.position[0] - w / 2, b.x - pad), b.x + b.w + pad - w)
+      y = Math.min(Math.max(at.position[1] - h / 2, b.y - pad), b.y + b.h + pad - h)
+    }
+    this.camera.frameArea({ x: x * unit, y: y * unit, width: w * unit, height: h * unit }, avoid)
+  }
+  /** 地图上一点（地图坐标）在不在露出来的那块里（留边） */
+  private inOpenArea(point: [number, number], avoid: Cover) {
+    const m = this.svg.getScreenCTM()
+    if (!m) return false
+    const [vx, vy] = this.camera.project(point)
+    const x = m.a * vx + m.c * vy + m.e,
+      y = m.b * vx + m.d * vy + m.f
+    const box = this.svg.getBoundingClientRect()
+    const insets = this.viewInsets ?? { top: 0, right: 0, bottom: 0, left: 0 }
+    const edge = 60
+    return (
+      x >= box.left + insets.left + edge &&
+      x <= box.right - insets.right - (avoid.right ?? 0) - edge &&
+      y >= box.top + insets.top + (avoid.top ?? 0) + edge &&
+      y <= box.bottom - insets.bottom - (avoid.bottom ?? 0) - edge
+    )
   }
   setPlaceMarker(target: WalkTarget | null) {
     this.placeAt = target
@@ -943,7 +1256,21 @@ export class TownMap {
   placeSpotAt(client: [number, number]): PlaceSpot | undefined {
     const point = this.camera.groundAt(...client)
     const locale = this.localeAt(point)
-    return locale ? { locale, near: this.walkTarget(point) } : undefined
+    if (!locale) return undefined
+    const here = this.walkTarget(point)
+    const grid = this.placeGrids.get(locale)
+    if (!grid) return { locale, near: here }
+    // 吸到离指针最近的能放的格子：放置器按 near 挑空位，近的那格能放就落在那一格
+    const cell = cellNear(grid, here.position)
+    const free = freeNear(grid, here.position)
+    return {
+      locale,
+      near: free ? { space: here.space, position: free.at } : here,
+      point: here,
+      code: cell?.code ?? '.',
+      by: cell?.by,
+      full: !free,
+    }
   }
   /** 能放东西的地点：有三维数据时按各地点的可放置范围（和后端放置器用的同一块），
    *  否则按房间和图上的区域格子；只认居民能待的地点，路段和通道不算 */
@@ -1026,6 +1353,7 @@ export class TownMap {
         DEV_CLOCK?.weather ?? msg.environment?.kind,
       ]
       this.hd?.setClock(...this.clock)
+      if (this.metre) this.hd?.setGameMode(msg.game_mode ?? null, this.metre)
     }
     if (msg.type === 'population') {
       this.templates = new Map(msg.population.residents.map((r) => [r.id, r.template_id]))
@@ -1038,6 +1366,7 @@ export class TownMap {
   }
   dispose() {
     this.disposed = true
+    cancelAnimationFrame(this.watchLoop)
     this.abort.abort()
     this.peek.stop()
     this.markReady()
@@ -1153,9 +1482,9 @@ export class TownMap {
   followTo(x: number, y: number, dt: number, how?: 'window' | 'centre' | 'snap') {
     return this.camera.follow(x, y, dt, how)
   }
-  /** 滚轮缩放的不动点：给了就围着它缩（化身跟随时围着化身），没有就围着鼠标 */
+  /** 缩放的不动点：给了就围着它缩（化身跟随时围着化身）；没给时跟随中的村民是不动点，再没有就围着鼠标 */
   setZoomAnchor(anchor: (() => [number, number] | undefined) | null) {
-    this.camera.zoomAnchor = anchor
+    this.externalAnchor = anchor
   }
   /** 地图被面板盖住的四边；立体场景晚一步建好时补上 */
   private viewInsets: { top: number; right: number; bottom: number; left: number } | undefined
@@ -1197,6 +1526,35 @@ export class TownMap {
   }
   /** 进游戏后第一份名册里选中的人：镜头对准他，不停在空广场 */
   private rosters = 0
+  /** 重演拍素材时景深对准的人（见 director）；不画选中的光圈 */
+  private directorFocus: string | null = null
+  /** 重演拍素材用的镜头（replay/director.ts）：机位按地面点、宽度、转角、俯角读写 */
+  readonly director: DirectorCamera = {
+    shot: (): CameraShot => ({
+      ...this.camera.shot(),
+      yaw: this.hd?.yaw ?? 0,
+      pitch: this.hd?.pitch ?? DEFAULT_PITCH,
+    }),
+    setShot: (shot, rise = 0) => {
+      if (this.hd && (shot.pitch !== this.hd.pitch || shot.yaw !== this.hd.yaw))
+        this.hd.setAngles(shot.pitch, shot.yaw, true)
+      this.camera.setShot(shot.center, shot.width, rise)
+    },
+    drawnAt: (id) => this.getDrawnPos(id),
+    bodyRise: () => this.watchRise(),
+    focus: (id) => {
+      this.directorFocus = id
+      this.syncFocus()
+      this.refreshRooms()
+    },
+    setSmooth: (on) => {
+      this.camera.smooth = on
+    },
+    onFrame: (hook) => {
+      this.directorHook = hook
+      this.hd?.requestDraw()
+    },
+  }
   setSelected(id: string | null) {
     this.selectedId = id
     this.residents.setSelected(id)
@@ -1211,7 +1569,7 @@ export class TownMap {
   }
   /** 立体场景的焦点跟着选中的人，没选人时跟着玩家操控的人；他在交谈时清晰带收窄，像特写 */
   private syncFocus() {
-    const id = this.selectedId ?? this.liveId
+    const id = this.directorFocus ?? this.selectedId ?? this.liveId
     const member = id ? this.entries.find((e) => e.member.id === id)?.member : undefined
     this.hd?.setFocusSubject(member ? member.id : null, !!member?.chat)
   }

@@ -50,7 +50,8 @@ export function dataRoot() {
 }
 /**
  * 一句话建镇时的描述、世界观建议和推荐的居民，和小镇放在一起（creation.json）：换设备、换成 mac 版
- * 打开也还在。逐步设置的小镇没有这个文件。手机上的管理服务（crates/manager/src/storage.rs）规则相同。
+ * 打开也还在。逐步设置的小镇没有这个文件。从预制小镇开的一局另记 prefab（预制小镇的编号，见
+ * frontend/town-shared/src/prefabs），进镇时按它出开局设置。手机上的管理服务（crates/manager/src/storage.rs）规则相同。
  */
 export function townCreation(value) {
   if (value === undefined || value === null) return null
@@ -63,6 +64,9 @@ export function townCreation(value) {
   }
   const residents = value.residents ?? []
   if (!Array.isArray(residents) || residents.length > 5) throw invalid()
+  const prefab = value.prefab ?? null
+  if (prefab !== null && (typeof prefab !== 'string' || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(prefab)))
+    throw invalid()
   return {
     description: text(value.description, 2000),
     worldview: text(value.worldview, 6000),
@@ -71,12 +75,15 @@ export function townCreation(value) {
       if (!line) throw invalid()
       return line
     }),
+    ...(prefab ? { prefab } : {}),
   }
 }
 export function safeId(id) {
   if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,90}$/.test(id)) throw Error('小镇编号无效')
   return id
 }
+// 列表顺序：自带的小镇、预制小镇，再是玩家建的
+const builtinRank = (id) => (id === 'default-town' ? 2 : id.startsWith('prefab-') ? 1 : 0)
 export class Storage {
   constructor(root, source) {
     this.root = root
@@ -127,12 +134,14 @@ export class Storage {
       throw e
     }
   }
+  // 内置小镇：随应用发的 default-town，和预制玩法的 prefab-<编号>（第一次选中时生成，只能重新开始）
   canDelete(id) {
     safeId(id)
-    return id !== 'default-town'
+    return id !== 'default-town' && !id.startsWith('prefab-')
   }
-  async remove(id) {
-    if (!this.canDelete(id)) throw Error('内置地图不能删除')
+  /** reset：重新开始预制小镇，允许删掉内置的 prefab-<编号> */
+  async remove(id, reset = false) {
+    if (!(reset ? id.startsWith('prefab-') : this.canDelete(id))) throw Error('内置地图不能删除')
     // 不跟随小镇目录的符号链接，避免删除目录外的数据。
     await this.map(id)
     const dir = this.town(id)
@@ -219,9 +228,7 @@ export class Storage {
       }
     }
     return result.sort(
-      (a, b) =>
-        Number(b.id === 'default-town') - Number(a.id === 'default-town') ||
-        a.name.localeCompare(b.name, 'zh-CN')
+      (a, b) => builtinRank(b.id) - builtinRank(a.id) || a.name.localeCompare(b.name, 'zh-CN')
     )
   }
 }

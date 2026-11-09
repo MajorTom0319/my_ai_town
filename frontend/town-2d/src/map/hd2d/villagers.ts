@@ -19,7 +19,7 @@ import {
   type Cue,
   type Quirk,
 } from './villagerCues'
-import { CYCLE, SIGN_RANK, type Shown, type Sign } from './villagerSigns'
+import { CYCLE, SIGN_RANK, type Badge, type Shown, type Sign } from './villagerSigns'
 import { poseOf } from './villagerPose'
 
 // 村民立牌：位置跟着名册走。名册每拍（100 毫秒）来一次，立牌比最新一份晚一到两拍，在相邻两份
@@ -211,6 +211,11 @@ export class Villagers {
   setLiveMotion(motion: LiveMotion | null) {
     this.motion = motion
   }
+  /** 玩法挂在头顶的常驻标记：村民编号 → 标记（大逃杀里拿着信号弹的人） */
+  private badges: ReadonlyMap<string, Badge> = new Map()
+  setBadges(badges: ReadonlyMap<string, Badge>) {
+    this.badges = badges
+  }
 
   /** prepare：每个新立牌的材质过一遍（接光照图） */
   constructor(
@@ -316,7 +321,7 @@ export class Villagers {
   private readonly heard = new Map<string, Villager['talk']>()
 
   /** 换上新的线索：新说出口的一句开始动嘴；聊完了高兴一阵、冒个心；被治好冒心，复活、神力先惊讶再高兴，
-   *  天上落下光柱；邀请被拒冒怒，有了新目标冒灯泡；身边有人倒下，旁边的人吓一跳 */
+   *  天上落下光柱；邀请被拒冒怒，牵手、依偎、拥抱冒心，有了新目标冒灯泡；身边有人倒下，旁边的人吓一跳 */
   private cue(v: Villager, cue: Cue) {
     const before = v.cue
     v.cue = cue
@@ -342,6 +347,11 @@ export class Villagers {
       }
     }
     if (cue.declined && before.declined !== cue.declined) this.signal(v, 'anger', now)
+    // 牵起手、靠上去、抱在一起的那一下：两人都高兴一阵、冒个心
+    if (cue.touch && cue.touch !== before.touch) {
+      v.react = [{ mood: 'happy', until: now + 2500 }]
+      this.signal(v, 'heart', now)
+    }
     if (cue.goal && before.goal && before.goal !== cue.goal) this.signal(v, 'bulb', now)
     const fell = (cue.down || cue.dead) && !before.down && !before.dead && before !== cue
     if (fell && v.mesh.visible)
@@ -525,6 +535,18 @@ export class Villagers {
     ]
   }
 
+  /** 立牌此刻走多快（地图单位 / 毫秒，按播放快慢折成真实时间）：镜头锁住跟随时按它往前补一截。
+   *  照时间轴上这一段算，不按每帧位移估，换位置偏移、进门出门那一下跳不会被当成飞快地走；
+   *  站着、操控中的人为零 */
+  velocity(id: string): [number, number] | undefined {
+    const v = this.all.get(id)
+    if (!v) return
+    const [a, b] = v.path
+    if (v.live || !b || b.t <= a.t || this.play < a.t || this.play >= b.t) return [0, 0]
+    const k = this.rate / (b.t - a.t)
+    return [(b.x - a.x) * k, (b.y - a.y) * k]
+  }
+
   /** 每帧画之前调用（now 是这一帧的时刻）：摆到播放时刻的位置，更新朝向，画好每人这一帧；
    *  有人走动时返回 true */
   step(now: number) {
@@ -665,6 +687,7 @@ export class Villagers {
       body: bodyOf(v.cue),
       wear: this.wearOf(v),
       sign: this.signNow(v, now),
+      badge: this.badges.get(v.id),
       revived: v.revived,
     }
     // 没伞淋雨的人小跑：脚步比走过的路快；走得慢的人步子慢
@@ -674,7 +697,8 @@ export class Villagers {
     m.close = this.texelPx >= 3
     m.pick = v.id === this.picked ? 'pick' : v.id === this.hovered ? 'hover' : undefined
     const f = v.acting.frame(m)
-    v.crown = (f.props?.key.includes('umbrella') ? 10 : f.sign ? 3 : 0) * PIXEL * VILLAGER_SCALE
+    v.crown =
+      (f.props?.key.includes('umbrella') ? 10 : f.sign || f.badge ? 3 : 0) * PIXEL * VILLAGER_SCALE
     const key = frameKey(f)
     if (key === v.drawn) return
     v.drawn = key

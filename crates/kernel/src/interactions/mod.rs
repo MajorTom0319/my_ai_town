@@ -17,6 +17,7 @@ mod chat;
 mod chat_validation;
 pub(crate) mod chat_view;
 mod commands;
+mod pledge;
 mod proposals;
 pub(crate) mod validation;
 pub(crate) mod walk;
@@ -45,6 +46,28 @@ pub const TALK_HOLD_MINUTES: f64 = 10.0;
 /// 交谈与赠予的固定时长（分钟）。
 pub(crate) const TALK_MINUTES: f64 = 5.0;
 pub(crate) const GIVE_MINUTES: f64 = 1.0;
+
+/// 亲近多久：拥抱一下，牵手、依偎待一会儿。
+pub(crate) fn touch_minutes(gesture: protocol::Gesture) -> f64 {
+    match gesture {
+        protocol::Gesture::HoldHands => 10.0,
+        protocol::Gesture::Lean => 15.0,
+        protocol::Gesture::Hug => 3.0,
+    }
+}
+
+/// 亲近在旁人眼里的样子：成了是两人牵手、依偎、抱在一起，没成是一个人躲开了。
+pub(crate) fn touch_scene(gesture: protocol::Gesture, a: &str, b: &str, accepted: bool) -> String {
+    use protocol::Gesture::*;
+    match (gesture, accepted) {
+        (HoldHands, true) => format!("{a}和{b}牵起了手"),
+        (Lean, true) => format!("{a}靠在了{b}身上"),
+        (Hug, true) => format!("{a}和{b}抱在了一起"),
+        (HoldHands, false) => format!("{a}想牵{b}的手，{b}躲开了"),
+        (Lean, false) => format!("{a}想靠在{b}身上，{b}躲开了"),
+        (Hug, false) => format!("{a}想抱{b}，{b}躲开了"),
+    }
+}
 
 /// 全部互动，按编号索引。规则在这里与 chat.rs，改动的入口在 commands.rs（World）。
 #[derive(Debug, Clone, Default)]
@@ -131,6 +154,11 @@ impl Interactions {
 
     fn get_mut(&mut self, id: &str) -> &mut Interaction {
         self.items.get_mut(id).expect("互动存在")
+    }
+
+    /// 这个编号有没有互动用着（不论有没有本人）；agent 起新编号时避开。
+    pub fn contains(&self, id: &str) -> bool {
+        self.items.contains_key(id)
     }
 
     /// 本人参与的某项互动。
@@ -439,6 +467,7 @@ impl Interactions {
                 }
                 InteractionKind::Walk { .. } => "同行结束".into(),
                 InteractionKind::Appointment { .. } => "约定达成：按约在约好的地方见上了面".into(),
+                InteractionKind::Touch { gesture } => format!("{}了一会儿", gesture.label()),
             }
         } else {
             format!(

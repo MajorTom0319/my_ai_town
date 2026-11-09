@@ -14,7 +14,9 @@ const PACKS: Record<ThemeId, MapTheme> = { village, wasteland, frozen }
 const PRESETS = new Map<string, MapTheme>(STYLE_PRESETS.map((p) => [p.id, PACKS[p.theme]]))
 
 export function themeOf(document: Pick<MapDocument, 'generation'>): MapTheme {
-  return (
+  const theme =
     PRESETS.get(document.generation?.spec?.environment?.preset ?? '') ?? PACKS[DEFAULT_PRESET.theme]
-  )
+  // 野外小径、环岛小径（荒岛、野地）：路边不立路灯
+  const settlement = document.generation?.spec?.settlement
+  return settlement === 'wild' || settlement === 'ring' ? { ...theme, lamp: 'none' } : theme
 }

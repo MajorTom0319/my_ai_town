@@ -64,6 +64,14 @@ pub struct WorldSnapshot {
     /// 化身神力开关；旧存档没有这一项，按关闭读入。关着时不写，没开过神力的存档换回旧版本照样能读。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     miracles: bool,
+    /// 陌生环境开关和藏着的东西；旧存档没有，按熟悉、什么也没藏读入。没用过时不写。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    strangers: bool,
+    /// 开着的玩法；旧存档没有，按没开读入。没开时不写。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    game_mode: Option<crate::game_mode::GameMode>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    concealed: std::collections::BTreeSet<String>,
     /// 旧存档没有这一项：没有待发生的事，随机流从固定起点开始。
     #[serde(default)]
     happenings: crate::happenings::Happenings,
@@ -98,6 +106,9 @@ impl World {
             supplies: self.props.supplies.clone(),
             physiology: self.physiology,
             miracles: self.miracles,
+            strangers: self.strangers,
+            game_mode: self.game_mode.clone(),
+            concealed: self.concealed.clone(),
             happenings: self.happenings.clone(),
         }
     }
@@ -133,6 +144,14 @@ impl World {
         let mut candidate = self.restore_candidate(&snapshot)?;
         candidate.physiology = snapshot.physiology;
         candidate.miracles = snapshot.miracles;
+        candidate.strangers = snapshot.strangers;
+        candidate.game_mode = snapshot.game_mode.clone();
+        candidate.concealed = snapshot.concealed.clone();
+        if let Some(map) = candidate.walk_map.as_deref() {
+            for a in snapshot.actors.values_mut() {
+                settle_free(map, &mut a.locus);
+            }
+        }
         snapshot.validate(&candidate)?;
         candidate.minutes = snapshot.minutes;
         candidate.actors = snapshot.actors;
@@ -520,7 +539,8 @@ fn validate_plan_item(intent: &Intent, topo: &Topology, affordances: &Affordance
             KernelError::snapshot("存档计划目的地无效")
         ),
         Intent::Stay { cond, .. } => check_cond(cond)?,
-        Intent::Look => {}
+        // 动手的对象和东西在开始那一刻按当时的世界重查
+        Intent::Look | Intent::Force { .. } | Intent::Search | Intent::Hide => {}
         Intent::Do { verb, cond, .. } => {
             ensure!(
                 affordances.is_verb(verb),
@@ -540,4 +560,26 @@ fn check_cond(cond: &StopCond) -> Result<()> {
         KernelError::snapshot("存档活动剩余时长无效")
     );
     Ok(())
+}
+
+/// 自由位置落在所在区域外（大逃杀第二局：有人站在新放的道具跟前，落在可走格子外面）：挪到同一处所里
+/// 最近的走得通的一点，读档不再整个失败。挪不了的不动，照旧由校验拒绝。
+fn settle_free(map: &crate::avatar::WalkMap, locus: &mut Locus) {
+    let At::Free {
+        space, position, ..
+    } = &mut locus.at
+    else {
+        return;
+    };
+    if map.locale_at(space, *position, &locus.locale) == Some(locus.locale.as_str()) {
+        return;
+    }
+    let here = crate::avatar::Spot {
+        locale: locus.locale.clone(),
+        space: space.clone(),
+        position: *position,
+    };
+    if let Some(spot) = map.nearest_clear(&here, &[], true) {
+        *position = spot.position;
+    }
 }

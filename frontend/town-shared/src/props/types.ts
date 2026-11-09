@@ -12,7 +12,14 @@ export type InstantEffect =
   | { kind: 'harm'; amount: number; wound: string }
   | { kind: 'give_item'; item: Definition; count: number }
   | { kind: 'place_prop'; prop: Definition }
-  | { kind: 'chance'; percent: number; effects: InstantEffect[]; miss?: string }
+  | {
+      kind: 'chance'
+      percent: number
+      effects: InstantEffect[]
+      miss?: string
+      /** 随身带着这样东西时按更高的概率掷 */
+      boost?: { item: string; name: string; percent: number }
+    }
   | {
       kind: 'schedule'
       key: string
@@ -66,6 +73,8 @@ export interface Definition {
   bulletin_board: boolean
   /** 遮蔽处：在上面做事按室内算 */
   shelter?: boolean
+  /** 藏着的：放下后到了也看不见，要搜寻才找得到 */
+  hidden?: boolean
 }
 export interface Instance {
   id: string
@@ -158,6 +167,8 @@ export interface PropCatalog {
   world_id: string
   persistent: boolean
   definitions: Definition[]
+  /** 镇上有、道具库里没有的定义：从库里删掉的、本来就不在库里的（摘下来的椰子）；都在库里时不发 */
+  town_definitions?: Definition[]
   instances: PropView[]
   locations: {
     id: string

@@ -3,7 +3,7 @@ import { el } from '../dom'
 import { isTouch } from '../platform'
 import { settingRow, switchControl } from './controls'
 
-// 声音与按键：音乐/音效开关直接驱动顶栏按钮（状态走同一份 localStorage），
+// 声音与按键：音乐/音效开关和菜单里的两个开关是同一个状态（走同一份 localStorage），
 // HD-2D 按键说明是静态内容，不需要保存；触屏上换成手势和屏幕按钮的说明。
 
 type Keys = [keys: string, action: string][]
@@ -26,7 +26,7 @@ const KEYS_2D: [string, Keys][] = [
       ['点地面 · <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>', '走路'],
       ['<kbd>E</kbd> · <kbd>Tab</kbd>', '和提示的对象互动 · 换一个对象'],
       ['<kbd>B</kbd> · <kbd>Esc</kbd>', '背包 · 收起面板'],
-      ['<kbd>F</kbd>', '对身边的人施展神力（设定里打开化身神力后）'],
+      ['<kbd>F</kbd>', '对身边的人施展神力（先点左上角的「世界观」，在规则里打开化身神力）'],
     ],
   ],
 ]
@@ -36,11 +36,11 @@ const TOUCH_2D: [string, Keys][] = [
   [
     '看小镇时',
     [
-      ['点顶栏的 ▶', '开始 / 暂停'],
+      ['点左上角的 ▶', '开始 / 暂停'],
       ['单指拖动 · 两指缩放', '移动地图 · 缩放'],
       ['两指一起上下拖', '调整俯角'],
       ['点村民 · 点「资料」', '脚下出现说话、跟随等按钮 · 打开角色卡；左右滑卡片换人'],
-      ['点地图顶上的头像', '镜头过去，打开他的角色卡'],
+      ['点左上角的头像', '镜头过去，打开他的角色卡'],
       ['点空地', '取消选中'],
     ],
   ],
@@ -50,12 +50,12 @@ const TOUCH_2D: [string, Keys][] = [
       ['左下摇杆 · 点地面', '走路'],
       ['右下主按钮 · 换目标', '和提示的对象互动 · 换一个对象'],
       ['背包 · 返回键', '背包 · 收起面板'],
-      ['操作条上的「神力」', '对身边的人施展神力（设定里打开化身神力后）'],
+      ['操作条上的「神力」', '对身边的人施展神力（先点左上角的「世界观」，在规则里打开化身神力）'],
     ],
   ],
 ]
 
-/** 一个声音开关：顶栏按钮与这一页改的是同一个状态 */
+/** 一个声音开关：菜单里的开关与这一页改的是同一个状态 */
 interface SoundSwitch {
   enabled(): boolean
   toggle(): void
@@ -63,14 +63,19 @@ interface SoundSwitch {
 
 export function createSoundPage(
   game: boolean,
-  audio: { music: SoundSwitch; effects: SoundSwitch }
+  audio: { music: SoundSwitch; story: SoundSwitch; effects: SoundSwitch }
 ): SettingsPage {
   const page = el('section', '', 'spage')
   page.append(el('h2', '声音与按键'))
   const rows = el('div', '', 'set-rows')
   const toggles = (
     [
-      [audio.music, '音乐', '白天、傍晚、雨夜各有曲目，随游戏内时间切换'],
+      [audio.music, '音乐', '按地图风格、时段和天气换曲，大逃杀按潮水的进度换'],
+      [
+        audio.story,
+        '剧情音乐',
+        '有人去世、遇害、健康危重、缺吃少喝时换上相应的曲子；关掉后不因这些换曲',
+      ],
       [audio.effects, '音效', '脚步声、下雨与环境氛围声'],
     ] as const
   ).map(([sound, label, description]) => {

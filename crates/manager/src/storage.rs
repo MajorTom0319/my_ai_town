@@ -65,7 +65,8 @@ pub fn check_identity(document: &Value) -> Result<(), ApiError> {
 }
 
 /// 一句话建镇时的描述、世界观建议和推荐的居民，和小镇放在一起（creation.json）：换设备、换成电脑版
-/// 打开也还在。逐步设置的小镇没有这个文件。规则与电脑版（scripts/towns/storage.mjs 的 townCreation）相同。
+/// 打开也还在。逐步设置的小镇没有这个文件。从预制小镇开的一局另记 prefab（预制小镇的编号），进镇时按它
+/// 出开局设置。规则与电脑版（scripts/towns/storage.mjs 的 townCreation）相同。
 pub fn town_creation(value: &Value) -> Result<Option<Value>, ApiError> {
     if value.is_null() {
         return Ok(None);
@@ -89,11 +90,27 @@ pub fn town_creation(value: &Value) -> Result<Option<Value>, ApiError> {
             .collect::<Result<_, _>>()?,
         _ => return Err(invalid()),
     };
-    Ok(Some(json!({
+    let mut creation = json!({
         "description": text(&value["description"], 2000)?,
         "worldview": text(&value["worldview"], 6000)?,
         "residents": residents,
-    })))
+    });
+    match &value["prefab"] {
+        Value::Null => {}
+        Value::String(id) if prefab_id(id) => creation["prefab"] = json!(id),
+        _ => return Err(invalid()),
+    }
+    Ok(Some(creation))
+}
+
+/// 预制小镇的编号：小写字母、数字和连字符，字母或数字开头，最多 40 个字符。
+fn prefab_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id.len() <= 40
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 pub struct TownMap {
@@ -263,12 +280,19 @@ impl Storage {
             .unwrap_or_else(|| id.to_owned())
     }
 
+    /// 内置小镇：随应用发的 default-town，和预制玩法的 prefab-<编号>（第一次选中时生成，只能重新开始）
     pub fn can_delete(&self, id: &str) -> bool {
-        id != BUILTIN_TOWN
+        id != BUILTIN_TOWN && !id.starts_with("prefab-")
     }
 
-    pub fn remove(&self, id: &str) -> Result<(), ApiError> {
-        if !self.can_delete(id) {
+    /// reset：重新开始预制小镇，允许删掉内置的 prefab-<编号>
+    pub fn remove(&self, id: &str, reset: bool) -> Result<(), ApiError> {
+        let allowed = if reset {
+            id.starts_with("prefab-")
+        } else {
+            self.can_delete(id)
+        };
+        if !allowed {
             return Err(ApiError::new(403, "内置地图不能删除"));
         }
         self.map(id)?;
@@ -351,9 +375,14 @@ impl Storage {
             }
         }
         towns.sort_by(|a, b| {
-            let builtin = |t: &Value| t["id"] != BUILTIN_TOWN;
-            builtin(a)
-                .cmp(&builtin(b))
+            // 自带的小镇、预制小镇，再是玩家建的
+            let rank = |t: &Value| match t["id"].as_str() {
+                Some(BUILTIN_TOWN) => 0,
+                Some(id) if id.starts_with("prefab-") => 1,
+                _ => 2,
+            };
+            rank(a)
+                .cmp(&rank(b))
                 .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
         });
         Ok(towns)

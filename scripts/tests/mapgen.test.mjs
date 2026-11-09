@@ -62,6 +62,77 @@ test('default and generated maps are valid, connected, deterministic and obey co
   for (const name of ['老书馆', '灯塔下的屋', '渔家 1', '渔家 3', '广场'])
     assert(topologyNames.includes(name), name)
   assert.equal(new Set(topologyNames).size, topologyNames.length)
+  // 野外小径：路和落脚点的名字里没有「小镇」「街道」，村民走在路上看到的就是这些名字
+  const wild = gen({ ...spatial, settlement: 'wild' }).document
+  gate(wild)
+  const roadNames = [
+    ...wild.topology.locales,
+    ...wild.topology.stations,
+    ...wild.layout.regions,
+  ].map((x) => x.name)
+  assert(roadNames.includes('野外') && roadNames.includes('小径'), roadNames.join('、'))
+  assert(!roadNames.some((n) => /小镇|街道/.test(n)), roadNames.join('、'))
+  // 野外图上新来的人落在第一个地点里（荒岛上醒来就在海滩），小镇落在街道上
+  assert.equal(wild.topology.entry.locale, wild.topology.places[0].locale)
+  assert.equal(gen(spatial).document.topology.entry.locale, 'roads')
+  // 环岛：户外地点沿海岸排一圈（绕岛心的角度依次递增），一圈小径首尾相连，名字照野外的叫法；
+  // 只排户外地点，至少三处
+  const ring = gen({
+    ...spatial,
+    settlement: 'ring',
+    places: [{ kind: 'area', count: 8, size: 'large' }],
+  }).document
+  gate(ring)
+  assert.equal(ring.topology.entry.locale, 'area_1')
+  assert(!ring.topology.locales.some((l) => /小镇|街道/.test(l.name)))
+  const ringPlaces = ring.topology.places.map((p) =>
+    ring.spatial.stations.find((s) => s.id === p.arrival_station)
+  )
+  const hub = [0, 2].map(
+    (k) => ringPlaces.reduce((s, p) => s + p.position[k], 0) / ringPlaces.length
+  )
+  const turns = ringPlaces.map((p) => Math.atan2(p.position[2] - hub[1], p.position[0] - hub[0]))
+  const steps = turns.map(
+    (t, i) => (turns[(i + 1) % turns.length] - t + 4 * Math.PI) % (2 * Math.PI)
+  )
+  assert(Math.abs(steps.reduce((s, x) => s + x, 0) - 2 * Math.PI) < 1e-6, '地点绕岛一圈')
+  // 主小径（不算各地点的入口岔路）上每个节点都正好接两段：一个没有断头的环
+  const degree = new Map()
+  for (const e of ring.layout.edges.filter((e) => e.road_class === 'street'))
+    for (const n of [e.from_node, e.to_node]) degree.set(n, (degree.get(n) ?? 0) + 1)
+  assert(
+    degree.size >= 8 && [...degree.values()].every((d) => d === 2),
+    JSON.stringify([...degree])
+  )
+  for (const bad of [
+    { places: [{ kind: 'area', count: 2, size: 'large' }] },
+    {
+      places: [
+        { kind: 'area', count: 3, size: 'large' },
+        { kind: 'home', count: 1, size: 'small' },
+      ],
+    },
+  ])
+    assert.throws(() => gen({ ...spatial, settlement: 'ring', ...bad }), /环岛小径/)
+  // 户外活动区域里有几个带名字的落脚点，各有一条走过去的通道
+  const areas = gen({
+    ...spatial,
+    settlement: 'wild',
+    places: [{ kind: 'area', count: 2, size: 'large' }],
+  }).document
+  gate(areas)
+  for (const locale of ['area_1', 'area_2']) {
+    const here = areas.topology.stations.filter(
+      (s) => s.locale === locale && s.id.startsWith('spot_')
+    )
+    assert(here.length >= 2, `${locale} 的落脚点：${here.map((s) => s.name)}`)
+    assert.equal(new Set(here.map((s) => s.name)).size, here.length)
+    for (const s of here)
+      assert(
+        areas.spatial.routes.some((r) => r.to === s.node),
+        `${s.id} 没有走过去的通道`
+      )
+  }
   assert.deepEqual(gen(spec), gen(spec))
   assert.deepEqual(
     gen(spec).document.layout,

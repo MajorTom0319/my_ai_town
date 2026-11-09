@@ -6,6 +6,16 @@ use protocol::{
     SupplyView,
 };
 
+/// 说明里的数字：最多两位小数，末尾的 0 不写（0.8333333333333334 写成 0.83，35.0 写成 35）。
+fn number(value: f64) -> String {
+    let text = format!("{value:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    match text {
+        "-0" => "0".into(),
+        _ => text.into(),
+    }
+}
+
 /// 效果说明只列开启的生理项；关掉的项对村民不存在。
 fn effect_texts(a: &Action, s: PhysiologySwitches) -> Vec<String> {
     let on = |need| enabled(s, need);
@@ -21,7 +31,7 @@ fn effect_texts(a: &Action, s: PhysiologySwitches) -> Vec<String> {
             } => Some(format!(
                 "{}每分钟恢复 {} 点{}",
                 need.label(),
-                per_minute,
+                number(*per_minute),
                 if *pause_decay {
                     "，暂停该项自然消耗"
                 } else {
@@ -59,15 +69,22 @@ fn instant_text(e: &InstantEffect, s: PhysiologySwitches) -> Option<String> {
             format!("完成时杀死对方，身上留下{wound}")
         }
         InstantEffect::Harm { amount, wound } => {
-            format!("完成时对方健康减少 {amount} 点，身上留下{wound}；健康扣到 0 就会死")
+            format!(
+                "完成时对方健康减少 {} 点，身上留下{wound}；健康扣到 0 就会死",
+                number(*amount)
+            )
         }
         InstantEffect::Restore { need, amount } => {
-            format!("完成时{}恢复 {amount} 点", need.label())
+            format!("完成时{}恢复 {} 点", need.label(), number(*amount))
         }
         InstantEffect::ApplyCondition {
             condition,
             severity,
-        } => format!("完成时施加{}（程度 {severity}）", condition.label()),
+        } => format!(
+            "完成时施加{}（程度 {}）",
+            condition.label(),
+            number(*severity)
+        ),
         InstantEffect::CureCondition { condition } => {
             format!("完成时解除{}，不补回健康", condition.label())
         }
@@ -79,7 +96,7 @@ fn instant_text(e: &InstantEffect, s: PhysiologySwitches) -> Option<String> {
                 .into_iter()
                 .zip(values)
                 .filter(|(need, _)| on(*need))
-                .map(|(need, v)| format!("{} {v}", need.label()))
+                .map(|(need, v)| format!("{} {}", need.label(), number(*v)))
                 .collect();
             let mut text = format!("完成时复活：{}", restored.join("、"));
             if on(Need::Health) {
@@ -96,7 +113,10 @@ fn instant_text(e: &InstantEffect, s: PhysiologySwitches) -> Option<String> {
         }
         InstantEffect::PlaceProp { prop } => format!("完成时在这里建成「{}」", prop.name),
         InstantEffect::Chance {
-            percent, effects, ..
+            percent,
+            effects,
+            boost,
+            ..
         } => {
             let inner: Vec<_> = effects
                 .iter()
@@ -106,7 +126,10 @@ fn instant_text(e: &InstantEffect, s: PhysiologySwitches) -> Option<String> {
             if inner.is_empty() {
                 return None;
             }
-            format!("完成时有 {percent}% 可能：{}", inner.join("，"))
+            let with = boost.as_ref().map_or(String::new(), |b| {
+                format!("（随身带着{}时 {}%）", b.name, b.percent)
+            });
+            format!("完成时有 {percent}% 可能{with}：{}", inner.join("，"))
         }
         // 后续会发生什么由世界决定；只说会有后续，不提前剧透。
         InstantEffect::Schedule { .. } => "完成后过一段时间可能会有动静".into(),

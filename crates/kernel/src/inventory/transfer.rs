@@ -71,13 +71,21 @@ fn portions(
         readable: None,
         bulletin_board: false,
         shelter: false,
+        hidden: false,
     };
     def.validate()?;
-    let prefix = format!("{:x}", Sha256::digest(format!("{}/{key}", actor.id)));
+    // 定义编号不进题面，照旧用整段哈希；实例编号村民要拿来用，取短的（见 props::short_hash）
+    let id = |hash: &str, i: u32| format!("portion:{hash}_{i}");
+    let prefix = crate::props::short_hash(&format!("{}/{key}", actor.id), |hash| {
+        (0..take.quantity).any(|i| {
+            let id = id(hash, i);
+            topo.prop(&id).is_some() || props.is_removed(&id)
+        })
+    });
     Ok((0..take.quantity)
         .map(|i| Placement {
             instance: Instance {
-                id: format!("portion:{prefix}_{i}"),
+                id: id(&prefix, i),
                 definition: def.reference(),
                 locale: actor.locus.locale.clone(),
                 name: None,
@@ -281,6 +289,7 @@ impl Inventory {
         Intent::Stay {
             cond: StopCond::Duration(1.0),
             station: source.and_then(|s| self.item_station(topo, actor, s)),
+            pose: crate::intent::Pose::Stand,
         }
     }
     /// 已通过 `check` 的操作在这里结算；返回回执里的变化。
@@ -384,6 +393,27 @@ impl Inventory {
             );
         }
         self.check_capacity(topo, props, &bag(to), items)
+    }
+    /// 抢、偷之前：东西还在对方身上，自己背包放得下。
+    pub(crate) fn check_seize(
+        &self,
+        topo: &Topology,
+        props: &Props,
+        from: &str,
+        to: &str,
+        item: &str,
+    ) -> Result<()> {
+        let items = [item.to_string()];
+        check_items(topo, props, &items)?;
+        ensure!(
+            self.carried_by(item, from),
+            KernelError::inventory("那件东西不在对方身上")
+        );
+        self.check_capacity(topo, props, &bag(to), &items)
+    }
+    /// 已通过 `check_seize` 的抢、偷在这里转移。
+    pub(crate) fn seize(&mut self, topo: &mut Topology, props: &mut Props, to: &str, item: &str) {
+        self.set_location(topo, props, item, bag(to));
     }
     /// 已通过 `check_gift` 的赠予在这里转移。
     pub(crate) fn finish_gift(

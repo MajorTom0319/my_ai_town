@@ -50,7 +50,11 @@ impl World {
         let place = &resident.locus.locale;
         match kind {
             InteractionKind::Talk | InteractionKind::Walk { .. } => Some(place.clone()),
-            InteractionKind::Give { .. } if self.topo.is_dwell(place) => Some(place.clone()),
+            InteractionKind::Give { .. } | InteractionKind::Touch { .. }
+                if self.topo.is_dwell(place) =>
+            {
+                Some(place.clone())
+            }
             _ => None,
         }
     }
@@ -198,7 +202,7 @@ impl World {
                 return self.join_walk(actor, interaction_id, message);
             }
         }
-        match command {
+        let result = match command {
             InteractionCommand::Offer {
                 partner_id,
                 interaction,
@@ -232,7 +236,16 @@ impl World {
                 self.interactions
                     .chat_command(&mut self.actors, now, actor, command)
             }
+        };
+        // 嘴上说把身上的东西给对方：东西还在他身上，两边各提醒一句（pledge.rs）
+        if let Some((text, listener)) = result
+            .as_ref()
+            .ok()
+            .and_then(|item| super::pledge::spoken(actor, command, item))
+        {
+            self.note_pledge(actor, &listener, text);
         }
+        result
     }
 
     fn offer(
@@ -337,15 +350,43 @@ impl World {
         if accept {
             self.start_pair_activity(&item);
         } else {
+            let reason = match item.kind {
+                InteractionKind::Touch { .. } => "对方躲开了",
+                _ => "受邀者拒绝了邀请",
+            };
             self.interactions.end(
                 &mut self.actors,
                 now,
                 interaction_id,
                 Status::Declined,
-                Some("受邀者拒绝了邀请".into()),
+                Some(reason.into()),
             );
         }
+        if let InteractionKind::Touch { gesture } = item.kind {
+            self.witness_touch(&item, gesture, accept);
+        }
         Ok(self.interactions[interaction_id].clone())
+    }
+
+    /// 亲近的那一下：双方各记一笔看得见的经过，同一处所醒着的旁人也看见，观察日志记一笔。
+    fn witness_touch(&mut self, item: &Interaction, gesture: protocol::Gesture, accepted: bool) {
+        let (a, b) = (&item.initiator, &item.partner);
+        let scene = super::touch_scene(
+            gesture,
+            &self.actors[a].name,
+            &self.actors[b].name,
+            accepted,
+        );
+        let now = self.minutes;
+        for id in [a, b] {
+            self.actor_mut(id)
+                .journal
+                .record_seen(now, scene.clone(), vec![item.id.clone()]);
+        }
+        let locale = item.locale.clone();
+        self.onlookers(&locale, &[a, b], &format!("看见{scene}"), false);
+        let info = self.actors[a].event_info();
+        self.log(info, scene);
     }
 
     /// 接受邀请前再查一遍：双方仍在邀请地点（玩家参与的只看还够不够得着）、能够回应，
@@ -541,9 +582,19 @@ fn check_kind(w: &World, actor: &str, partner: &str, kind: &InteractionKind) -> 
     let locale = &w.actors[actor].locus.locale;
     match kind {
         InteractionKind::Walk { leader, locale } => {
+            // 陌生环境里带路的人得认得要去的地方
+            if let Some(place) = locale.as_deref() {
+                let guide = if leader == "self" || leader == actor {
+                    actor
+                } else {
+                    leader.as_str()
+                };
+                ensure!(w.knows_way(guide, place), World::unknown_way());
+            }
             super::walk::check_walk(w, actor, partner, leader, locale.as_deref())
         }
         InteractionKind::Appointment { locale, at } => {
+            ensure!(w.remembers(actor, locale), World::unknown_way());
             super::appointments::check_appointment(w, locale, *at)
         }
         InteractionKind::Talk => {
@@ -551,6 +602,7 @@ fn check_kind(w: &World, actor: &str, partner: &str, kind: &InteractionKind) -> 
             w.check_weather_chat(partner)?;
             Ok(TALK_MINUTES)
         }
+        InteractionKind::Touch { gesture } => Ok(super::touch_minutes(*gesture)),
         InteractionKind::Give { items } => {
             w.inventory
                 .check_gift(&w.topo, &w.props, actor, partner, items)?;

@@ -1,5 +1,6 @@
 // 选中村民：地图上点人，脚下冒出一排动作钮（info/focus.ts）；点「资料」打开右栏的角色卡。
-// 角色卡只读：像素小人和想法、住处、正在做的事、身体状态、口袋，原因和记录收在「更多细节」里。
+// 角色卡分页签（info/tabs.ts）：「近况」是像素小人和想法、住处、正在做的事、身体状态、口袋，原因和记录收在
+// 「更多细节」里；「人设」「长相」「模型」就地改这位村民。
 // 跨级反馈：记录每项需求的上一个 band，变化时状态条一次性强调 + 追加本地事件。
 
 import {
@@ -8,6 +9,7 @@ import {
   type PopulationView,
   type ResidentRegistration,
   type RosterMember,
+  type ServerMsg,
 } from './protocol'
 import { agentStopped } from './display'
 import type { WaitLine } from './modelWait'
@@ -27,7 +29,8 @@ interface InfoPanelDeps {
   events: EventsHandle
   localeName: (id: string) => string
   onPossess: (id: string) => void
-  onEditResident: () => void
+  /** 页签里改人设、长相、模型要用的：发消息、保存、跳到设定（info/tabs.ts） */
+  editor: CardEditorDeps
   onOpenDiary: () => void
   onOpenMemory: () => void
   onSelectResident: (id: string) => void
@@ -50,10 +53,17 @@ interface InfoPanelDeps {
   miracleReady: () => boolean
   /** 「复活」「治愈」「补满」：进入化身、走过去施展 */
   onMiracle: (id: string, kind: MiracleKind) => void
+  /** 「调整」：世界暂停时直接改村民的身体数值 */
+  onAdjustBody: (
+    id: string,
+    values: BodyValues,
+    done: (ok: boolean, message: string) => void
+  ) => void
 }
 
 import { installPanelWidth } from './info/width'
 import { createBodyView } from './info/body'
+import { createBodyAdjust, type BodyValues } from './info/bodyAdjust'
 import { createFocus } from './info/focus'
 import { createInventoryView } from './info/inventory'
 import { createNeedsView, needWord, worstNeed } from './info/needs'
@@ -61,6 +71,7 @@ import { createThoughtView } from './info/thought'
 import { createPlanView } from './info/plan'
 import { createAgentView } from './info/agent'
 import { createStage } from './info/stage'
+import { createCardTabs, type CardEditorDeps, type CardTab } from './info/tabs'
 import './info/card.css'
 
 export function initInfoPanel(deps: InfoPanelDeps) {
@@ -76,6 +87,8 @@ export function initInfoPanel(deps: InfoPanelDeps) {
   // 「状态」标题右边的治愈、补满：看着数值直接点
   const miracleBox = $('info-miracles')
   const miracleBtns = [...miracleBox.querySelectorAll<HTMLButtonElement>('button')]
+  // 「状态」标题最右边的「调整」：暂停时直接拨身体数值
+  const adjustBtn = query<HTMLButtonElement>(panel, '#info-adjust')
   lineLabel(reviveBtn, 'spark', '复活')
   lineLabel(talkBtn, 'chat', '说话')
   lineLabel(followBtn, 'eye', '跟随')
@@ -83,7 +96,6 @@ export function initInfoPanel(deps: InfoPanelDeps) {
   lineLabel($('info-memory'), 'memory', '回忆')
   lineLabel($('info-diary'), 'clock', '经历')
   lineLabel($('info-chat'), 'chat', '聊过的')
-  lineLabel($('info-edit'), 'pen', '设定')
   lineLabel($('info-collapse'), 'close', '收起')
   possessBtn.onclick = () => {
     if (selectedId) deps.onPossess(selectedId)
@@ -105,12 +117,30 @@ export function initInfoPanel(deps: InfoPanelDeps) {
   /** 选中的人最近一份名册：地图上的动作钮按它决定能不能说话、附身 */
   let current: RosterMember | undefined
   const panelWidth = installPanelWidth(panel, resizer, obsMain)
+  const tabs = createCardTabs(panel, deps.editor, {
+    setWide: panelWidth.setWide,
+    reveal() {
+      const pos = selectedId ? deps.map.getMemberPos(selectedId) : undefined
+      if (pos) deps.map.panTo(pos[0], pos[1])
+    },
+  })
   const inventory = createInventoryView($('info-inventory'), deps.onOpenItem)
   const body = createBodyView($('info-physiology'), query<HTMLElement>(panel, '.info-body-folds'))
   const needs = createNeedsView($('info-needs'), '', (text, warning) =>
     deps.events.pushLocal(text, warning)
   )
   const thought = createThoughtView($('info-thought'))
+  const adjust = createBodyAdjust($('info-adjust-body'), {
+    apply: (values, done) => {
+      const id = selectedId
+      if (!id) return done(false, '没有选中村民')
+      // 成功时世界日志会广播「观察者调整了……」，这里不再另记一条
+      deps.onAdjustBody(id, values, (ok, message) => {
+        done(ok, message)
+        syncAdjust()
+      })
+    },
+  })
   const plan = createPlanView($('info-plan'))
   const agent = createAgentView($('info-agent'))
   const stage = createStage(query<HTMLCanvasElement>(panel, '.card-sprite'))
@@ -134,11 +164,31 @@ export function initInfoPanel(deps: InfoPanelDeps) {
     b.onclick = () => {
       if (selectedId) deps.onMiracle(selectedId, b.dataset.miracle as MiracleKind)
     }
+  adjustBtn.onclick = () => {
+    if (adjust.isOpen()) adjust.close()
+    else if (current) adjust.open(current.needs ?? [])
+    syncAdjust()
+  }
+  /** 世界的速度：「调整」只在暂停时能用 */
+  let worldSpeed = 0
+  /** 「调整」钮：活着的村民才有；世界在跑时灰着 */
+  function syncAdjust() {
+    const m = current
+    const alive = !!m && m.kind === 'resident' && m.body?.life !== 'dead' && !!m.needs?.length
+    adjustBtn.hidden = !alive
+    if (!alive && adjust.isOpen()) adjust.close()
+    adjustBtn.disabled = worldSpeed > 0 && !adjust.isOpen()
+    adjustBtn.title =
+      worldSpeed > 0 ? '先暂停世界，再调身体数值' : `直接调${m?.name ?? ''}的饱腹、精力、水分和健康`
+    adjustBtn.setAttribute('aria-expanded', String(adjust.isOpen()))
+    adjust.setPaused(worldSpeed === 0)
+  }
 
   function setCollapsed(collapsed: boolean) {
     panel.hidden = collapsed
     resizer.hidden = collapsed
     panel.classList.toggle('collapsed', collapsed)
+    if (collapsed) tabs.collapsed()
     syncFocus()
   }
   /** 收起角色卡，保留选中：地图上的动作钮还在 */
@@ -209,13 +259,16 @@ export function initInfoPanel(deps: InfoPanelDeps) {
       thought.clear()
       agent.clear()
       stage.clear()
+      adjust.close()
       current = undefined
     }
     selectedId = id
+    tabs.setResident(id)
     if (id) deps.onSelectResident(id)
     deps.map.setSelected(id)
     focus.show(id)
     possessBtn.disabled = !id
+    if (following) watchSelected()
     if (!id) {
       if (following) setFollowing(false)
       setCollapsed(true)
@@ -237,7 +290,7 @@ export function initInfoPanel(deps: InfoPanelDeps) {
   }
 
   /** Agent 停下了或者在等模型：卡片顶上写明原因。按钮只放能马上处理、又只关乎村民的事；
-   *  世界暂停时不放「继续行动」——开始运行是顶栏和地图提示的事，不在一个人的卡片上 */
+   *  世界暂停时不放「继续行动」——开始运行是开始钮和地图提示的事，不在一个人的卡片上 */
   function renderStop(m: RosterMember, speed: number) {
     const box = $('info-stop')
     const agent = m.resident_agent
@@ -267,14 +320,18 @@ export function initInfoPanel(deps: InfoPanelDeps) {
     followBtn.classList.toggle('on', following)
     followBtn.setAttribute('aria-pressed', String(following))
     lineLabel(followBtn, 'eye', following ? '跟随中' : '跟随')
-    if (on && selectedId) {
+    watchSelected()
+    if (on && selectedId && !deps.map.watch) {
       const pos = deps.map.getMemberPos(selectedId)
       if (pos) deps.map.panTo(pos[0], pos[1])
     }
     syncFocus()
   }
+  /** 地图能逐帧跟时，镜头锁住选中的人（换了人跟着换）；玩家拖开地图就不再跟随 */
+  function watchSelected() {
+    deps.map.watch?.(following ? selectedId : null, () => setFollowing(false))
+  }
   followBtn.onclick = () => setFollowing(!following)
-  $('info-edit').onclick = () => deps.onEditResident()
   $('info-diary').onclick = () => deps.onOpenDiary()
   $('info-memory').onclick = () => deps.onOpenMemory()
   $('info-collapse').onclick = collapse
@@ -287,7 +344,7 @@ export function initInfoPanel(deps: InfoPanelDeps) {
     )
     if (!entries.length && !selectedId) {
       $('info-name').textContent = '还没有村民'
-      $('info-place').textContent = '点顶栏的「邀请村民」请几位住进来'
+      $('info-place').textContent = '点地图左上角的「邀请」请几位住进来'
     }
     const me = selectedId ? entries.find((e) => e.member.id === selectedId) : undefined
     if (!me) return
@@ -303,9 +360,10 @@ export function initInfoPanel(deps: InfoPanelDeps) {
     talkBtn.hidden = !canTalk(m)
     talkBtn.title = `你的化身会走过去，${m.name}会停下来等你`
     renderMiracles(m)
+    worldSpeed = speed
+    syncAdjust()
 
     needs.setResidentName(m.name)
-    $('info-edit').title = `编辑${m.name}的设定`
     $('info-name').textContent = m.name
     const at = m.at
     $('info-place').textContent = deps.localeName(me.locale)
@@ -327,10 +385,10 @@ export function initInfoPanel(deps: InfoPanelDeps) {
     inventory.render(m.inventory)
     thought.render(m.thought, minutes)
     agent.render(m.resident_agent)
-    plan.render(m.plan, m.body)
+    plan.render(m.plan, m.body, m.resident_agent, minutes)
     syncFocus()
-    // 跟随：每次 roster 更新，村民在视野外（带边距）才平移
-    if (following) {
+    // 地图不会逐帧跟时：每次 roster 更新，村民在视野外（带边距）才平移
+    if (following && !deps.map.watch) {
       const pos = deps.map.getMemberPos(m.id)
       if (pos) deps.map.panTo(pos[0], pos[1])
     }
@@ -338,11 +396,14 @@ export function initInfoPanel(deps: InfoPanelDeps) {
 
   return {
     select,
-    /** 选中并打开角色卡 */
-    open(id: string) {
+    /** 选中并打开角色卡；给了页签就翻到那一页（村民页的「档案」开到人设） */
+    open(id: string, tab?: CardTab) {
       select(id)
       setCollapsed(false)
+      if (tab) tabs.show(tab)
     },
+    /** 页签里还没保存的修改，离开小镇前问一句 */
+    unsaved: () => tabs.unsaved(),
     dispose() {
       panelWidth.dispose()
       focus.show(null)
@@ -378,11 +439,17 @@ export function initInfoPanel(deps: InfoPanelDeps) {
     /** agent_config 到达后补上分界线的说明 */
     onTuning(t: NeedsTuning, healthMarks: number[]) {
       needs.tune(t, healthMarks)
+      adjust.tune(t, healthMarks)
     },
-    /** 人口登记：住宅与入村时间来自这里，不从 roster 猜 */
+    /** 人口登记：住宅与入村时间来自这里，不从 roster 猜；离开小镇的人，页签里他的几页一起删掉 */
     onPopulation(view: PopulationView) {
       registrations = new Map(view.residents.map((r) => [r.id, r]))
+      tabs.keep(new Set(registrations.keys()))
       renderHome()
+    },
+    /** 人设原文、模型配置等交给页签里的各页；不认领，后面的面板照常收到 */
+    handleMsg(msg: ServerMsg) {
+      tabs.handleMsg(msg)
     },
     /** 名册：先定选中谁，再刷新信息、跨级检测与跟随 */
     roster({ residents, msg }: RosterFrame) {
@@ -395,6 +462,8 @@ export function initInfoPanel(deps: InfoPanelDeps) {
         select(null)
       if (residents.length) picked = true
       render(residents, msg.sim_minutes, msg.speed)
+      // 模型页认其他村民（「套用到其他还没选的村民」）要看名册
+      tabs.handleMsg(msg)
     },
   }
 }

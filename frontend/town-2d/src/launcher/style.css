@@ -232,6 +232,20 @@ body:has(.map-launcher) {
   border-color: var(--ui-accent);
   color: var(--ui-accent);
 }
+/* 内置小镇：左边一道强调色，名字后带「内置」 */
+.map-option.is-builtin {
+  border-left: 3px solid var(--ui-accent);
+}
+.map-option-badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--ui-accent);
+  border-radius: 999px;
+  color: var(--ui-accent);
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: 2px;
+}
 .launcher-panel-footer {
   display: flex;
   align-items: center;

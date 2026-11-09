@@ -11,6 +11,9 @@
 mod weather;
 pub use weather::*;
 
+mod game_mode;
+pub use game_mode::*;
+
 mod actions;
 mod avatar;
 mod chat;
@@ -25,6 +28,7 @@ mod observation;
 mod physiology;
 mod population;
 mod props;
+mod recording;
 mod resident;
 mod roster;
 mod server_msg;
@@ -48,7 +52,9 @@ pub use client_msg::{ClientMsg, IntentDraft, UntilPredicate};
 pub use content::{
     ContentCommand, ContentDetail, ContentKind, ContentMetadata, ContentOrigin, ContentText,
 };
-pub use interactions::{Interaction, InteractionCommand, InteractionKind, InteractionStatus};
+pub use interactions::{
+    Gesture, Interaction, InteractionCommand, InteractionKind, InteractionStatus,
+};
 pub use location::{At, Locus};
 pub use model_config::{
     ActiveModelChoice, ModelChoice, ProviderConfigMsg, ProviderKeyMsg, ProviderView,
@@ -59,12 +65,12 @@ pub use notebook::{
     NotebookEntry, NotebookLink, NotebookQuery, NotebookSection, NotebookView,
 };
 pub use observation::{
-    Alert, DeathCause, DiaryDay, EventActor, EventInfo, EventKind, ReceiptView, ThoughtView,
-    TriggerInfo, TriggerKind,
+    Alert, DeathCause, DiaryDay, EventActor, EventInfo, EventKind, EventSpeech, ReceiptView,
+    ThoughtView, TriggerInfo, TriggerKind,
 };
 pub use physiology::{
-    BodyCondition, BodyConditionKind, BodyEvent, BodyEventKind, BodyView, Killing, Life,
-    Physiology, PhysiologySwitches,
+    BodyCondition, BodyConditionKind, BodyEvent, BodyEventKind, BodyValues, BodyView, Killing,
+    Life, Physiology, PhysiologySwitches,
 };
 pub use population::{
     is_hex_color, Appearance, BeardStyle, FaceGear, HairStyle, Headwear, HeldItem, HomeView,
@@ -77,18 +83,19 @@ pub use props::{
     PlaceRef, PropActionEntry, PropActionView, PropCapabilities, PropPreview, PropView,
     PropsCatalog, RateRange, StoredItem, SupplyView,
 };
+pub use recording::ReelView;
 pub use resident::{
-    ActionResultView, AgentLimitRanges, AgentLimits, AgentState, AgentUsage, EvidenceSource,
-    GoalStatus, HoldCause, LimitRange, MemoryKind, MemoryStatus, PauseKind, RequestKind,
-    RequestStatus, RequestView, ResidentAgentView, ResidentGoalView, ResidentInteractionView,
-    ResidentMemoryView, ResidentUsage, UsageSummary, WorldHold,
+    ActionResultView, AgentLimitRanges, AgentLimits, AgentState, AgentUsage, AgentWaitView,
+    EvidenceSource, GoalStatus, HoldCause, LimitRange, MemoryKind, MemoryStatus, PauseKind,
+    RequestKind, RequestStatus, RequestView, ResidentAgentView, ResidentGoalView,
+    ResidentInteractionView, ResidentMemoryView, ResidentUsage, UsageSummary, WorldHold,
 };
 pub use roster::{
     ActivityKind, MemberKind, MovementPhase, MovementView, PlanView, RosterLocale, RosterMember,
     VerbKind,
 };
 pub use server_msg::{ServerMsg, WorldSettingsView};
-pub use spatial::{Point3, PropPosition, Route, SpatialOverride, SpatialOverridesView};
+pub use spatial::{PlaceGrid, Point3, PropPosition, Route, SpatialOverride, SpatialOverridesView};
 
 /// 把值当作 `serde_json::Value` 输出：对象的键按字母序排列。
 ///

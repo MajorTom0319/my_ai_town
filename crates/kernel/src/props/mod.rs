@@ -3,6 +3,7 @@ pub(crate) mod catalog;
 mod commands;
 mod description;
 mod making;
+pub use making::MissingMaterial;
 mod state;
 pub(crate) mod views;
 use crate::error::{KernelError, Result};
@@ -37,6 +38,21 @@ pub(crate) fn check_room(existing: usize, incoming: usize) -> Result<()> {
     Ok(())
 }
 
+/// 运行中新生成的编号（做出来的物品、领取的单份、写好的书、定时出现的道具）里那段哈希先取几位。
+const SHORT_HASH: usize = 6;
+
+/// 新编号里的那段哈希：`seed` 的 SHA-256 先取前 6 位，`taken` 说撞了就多取一位，最多取满 64 位
+/// （就是原来的长编号）。编号要短：村民拿它调工具，题面里每次都带着；旧存档里的长编号照样认。
+pub(crate) fn short_hash(seed: &str, taken: impl Fn(&str) -> bool) -> String {
+    use sha2::{Digest, Sha256};
+    let full = format!("{:x}", Sha256::digest(seed));
+    (SHORT_HASH..full.len())
+        .map(|n| &full[..n])
+        .find(|hash| !taken(hash))
+        .unwrap_or(&full)
+        .to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
@@ -59,6 +75,9 @@ pub struct Definition {
     /// 遮蔽处：在这件道具上做事（避雨、睡觉）时按室内算，不淋雨雪，雷暴也不打断。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shelter: bool,
+    /// 藏着的：放下后到了也看不见，要搜寻才找得到（礁石缝里卡着的罐头）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 /// 动作的物品前提：开始和完成时本人背包里要有这么多件；`consume` 的在完成时用掉。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -159,12 +178,15 @@ pub enum InstantEffect {
     PlaceProp {
         prop: Box<Definition>,
     },
-    /// 按百分比概率发生的一组效果；没发生时回执写 `miss`。
+    /// 按百分比概率发生的一组效果；没发生时回执写 `miss`。`boost` 是带着某样工具时更高的概率
+    /// （带着木矛摸鱼更容易摸到）。
     Chance {
         percent: u32,
         effects: Vec<InstantEffect>,
         #[serde(default)]
         miss: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boost: Option<ChanceBoost>,
     },
     /// 过一段时间发生的世界事件：在场村民都会得知，可带一件限时出现的道具。
     /// 同一 `key` 还没发生时不重复安排。
@@ -179,6 +201,15 @@ pub enum InstantEffect {
     Depart {
         text: String,
     },
+}
+/// 带着某样东西时的概率：随身带着 `item`（物品定义编号，不含版本）时按 `percent` 掷，比基础概率高。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChanceBoost {
+    pub item: String,
+    /// 给村民和玩家看的物品名。
+    pub name: String,
+    pub percent: u32,
 }
 /// 定时事件带来的道具：放在 `locale`（默认是安排事件的地点），过 `lasts_minutes` 撤走并告知 `leave_text`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -326,13 +357,17 @@ impl Action {
             KernelError::props("对他人施用须使用完成时效果，不能包含持续效果")
         );
         if let Some(supply) = &self.supply {
+            // 补给在完成时统一扣、统一生效，过程中不能先拿到好处；劳作可以，那是做事的人自己的消耗，
+            // 不从补给里拿东西（捡木头、采棕榈叶）。
             ensure!(
                 supply.initial <= 1_000_000
                     && supply.cost > 0
                     && supply.cost <= 1_000_000
                     && !self.on_complete.is_empty()
-                    && self.during.is_empty(),
-                KernelError::props("有限补给须在完成时统一消耗和生效，数量不得超过一百万")
+                    && self.during.iter().all(|e| matches!(e, Effect::Labor)),
+                KernelError::props(
+                    "有限补给须在完成时统一消耗和生效，过程中只能有劳作消耗，数量不得超过一百万"
+                )
             );
             ensure!(
                 supply.restock.as_ref().is_none_or(
@@ -518,6 +553,7 @@ impl InstantEffect {
                 percent,
                 effects,
                 miss,
+                boost,
             } => {
                 ensure!(
                     !in_chance
@@ -526,6 +562,18 @@ impl InstantEffect {
                         && miss.chars().count() <= 200,
                     KernelError::props("概率须为 1–99%，包含 1–4 项效果，不能嵌套")
                 );
+                if let Some(b) = boost {
+                    ensure!(
+                        identifier(&b.item, true)
+                            && !b.item.starts_with("portion:")
+                            && !b.name.trim().is_empty()
+                            && b.name.chars().count() <= 40
+                            && (percent + 1..=99).contains(&b.percent),
+                        KernelError::props(
+                            "带工具时的概率须比基础概率高、不超过 99%，工具名 1–40 字"
+                        )
+                    );
+                }
                 for e in effects {
                     e.validate(depth, true)?;
                 }

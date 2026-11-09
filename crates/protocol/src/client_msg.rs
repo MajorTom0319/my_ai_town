@@ -93,12 +93,49 @@ pub enum ClientMsg {
         expected_revision: u64,
         switches: crate::PhysiologySwitches,
     },
+    /// 改气候（温带、热带）；回执与世界观相同（WorldSettingsSaved），随后广播世界设定。
+    /// 不暂停世界，不核对设定修订号；地图没有天气时拒绝。
+    SetClimate {
+        request_id: String,
+        world_id: String,
+        climate: crate::Climate,
+    },
     /// 打开或关掉化身神力；回执与世界观相同（WorldSettingsSaved），随后广播世界设定。
     /// 只是一个开关，不暂停世界，不核对设定修订号：别的页面正在改的世界观不会因此被拒。
     SetMiracles {
         request_id: String,
         world_id: String,
         enabled: bool,
+    },
+    /// 打开或关掉录像；回执与世界观相同（WorldSettingsSaved），随后广播世界设定和录像列表。
+    /// 打开就开新的一卷，关掉就收起正在录的那一卷；不暂停世界，不核对设定修订号。
+    SetRecording {
+        request_id: String,
+        world_id: String,
+        enabled: bool,
+    },
+    /// 读录下的几卷（回 Recordings）
+    GetRecordings,
+    /// 删掉录完的一卷（正在录的删不了）；回执是 WorldSettingsSaved，随后广播录像列表。
+    DeleteRecording {
+        request_id: String,
+        world_id: String,
+        reel: String,
+    },
+    /// 打开或关掉陌生环境（村民初来乍到，只知道到过的地方）；回执与世界观相同（WorldSettingsSaved），
+    /// 随后广播世界设定。改了就暂停世界，居民重新观察；打开时每人只记得眼下所在的地方和家。
+    SetStrangers {
+        request_id: String,
+        world_id: String,
+        enabled: bool,
+    },
+    /// 打开或关掉玩法：带 game_mode 是打开它，不带是关掉；回执与世界观相同（WorldSettingsSaved），
+    /// 随后广播世界设定。已经开着同一个玩法时不重来。
+    SetGameMode {
+        request_id: String,
+        world_id: String,
+        #[serde(default)]
+        game_mode: Option<crate::GameModeChoice>,
     },
     GetProps,
     Content {
@@ -118,6 +155,12 @@ pub enum ClientMsg {
         request_id: String,
         definition: serde_json::Value,
     },
+    /// 从道具库删掉自己做的一件道具，这个编号的所有版本一起删（回 PropResult，成功后广播道具目录）。
+    /// 只删道具库：镇上已经摆着的、背包里的各自存着整份定义，不受影响；自带的、地图本身摆着的删不了。
+    DeleteProp {
+        request_id: String,
+        id: String,
+    },
     RemoveProp {
         request_id: String,
         world_id: String,
@@ -126,6 +169,19 @@ pub enum ClientMsg {
     /// 放置道具；instance 是内核 `props::Instance` 的 JSON，理由同 ValidateProp。
     /// near 是在地图上点的位置，道具落在它附近的空位；不给时由放置器自己挑。
     PlaceProp {
+        request_id: String,
+        world_id: String,
+        instance: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        near: Option<PlaceNear>,
+    },
+    /// 摆道具时要各地点能放的格子（回 PlacementGrid）。
+    GetPlacementGrid {
+        request_id: String,
+        world_id: String,
+    },
+    /// 试放：instance、near 同 PlaceProp，只算这件会落在哪，不改世界（回 PlacementPreview）。
+    PreviewPlacement {
         request_id: String,
         world_id: String,
         instance: serde_json::Value,
@@ -190,6 +246,14 @@ pub enum ClientMsg {
         resident_id: String,
         appearance: crate::Appearance,
     },
+    /// 调已入住居民的身体数值（村民卡片上的「调整」）：只在世界暂停时放行，回 AgentSaved。
+    /// 不是世界里发生的事，本人的经历里不留痕，跨过提醒线照常提醒。
+    SetResidentBody {
+        request_id: String,
+        world_id: String,
+        resident_id: String,
+        values: crate::BodyValues,
+    },
     /// 读模型请求与 token 消耗（回 Usage）
     GetUsage,
     /// 读村民库卡片（回 ResidentLibrary）
@@ -246,6 +310,10 @@ pub enum ClientMsg {
         /// 入住时就定下用哪个模型思考；不带时先住下，选好模型后再行动
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ModelChoice>,
+        /// 预制小镇的选手：用这份人设（来历、处境、目标……）入住，姓名取 name，长相照模板；
+        /// 只给这一位居民，不回写村民库。不带时照模板的人设
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona: Option<Box<TemplateFields>>,
     },
     /// 断线后按操作编号查询加入结果（回 JoinResult）
     GetResidentJoinResult {
@@ -287,12 +355,20 @@ impl ClientMsg {
             | GetChatHistory { request_id, .. }
             | SetWorldview { request_id, .. }
             | SetPhysiology { request_id, .. }
+            | SetClimate { request_id, .. }
             | SetMiracles { request_id, .. }
+            | SetRecording { request_id, .. }
+            | DeleteRecording { request_id, .. }
+            | SetStrangers { request_id, .. }
+            | SetGameMode { request_id, .. }
             | Content { request_id, .. }
             | ValidateProp { request_id, .. }
             | SaveProp { request_id, .. }
+            | DeleteProp { request_id, .. }
             | RemoveProp { request_id, .. }
             | PlaceProp { request_id, .. }
+            | GetPlacementGrid { request_id, .. }
+            | PreviewPlacement { request_id, .. }
             | SetSpeed { request_id, .. }
             | SetModelConfig { request_id, .. }
             | SetResidentModel { request_id, .. }
@@ -301,6 +377,7 @@ impl ClientMsg {
             | SetPersona { request_id, .. }
             | ResetWorld { request_id }
             | SetResidentAppearance { request_id, .. }
+            | SetResidentBody { request_id, .. }
             | SaveResidentTemplate { request_id, .. }
             | GenerateResidentTemplate { request_id, .. }
             | ArchiveResidentTemplate { request_id, .. }
@@ -310,6 +387,7 @@ impl ClientMsg {
             JoinResident { op_id, .. } | GetResidentJoinResult { op_id, .. } => Some(op_id),
             AvatarInput { .. }
             | GetWorldSettings
+            | GetRecordings
             | GetProps
             | GetModelConfig
             | GetAgentConfig { .. }

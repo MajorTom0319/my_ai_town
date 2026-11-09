@@ -1,5 +1,12 @@
-import type { ClientMsg, PhysiologySwitches, ServerMsg, WorldSettingsState } from './protocol'
-import type { SettingsPage } from './settingsCenter'
+import type {
+  ClientMsg,
+  Climate,
+  GameModeChoice,
+  PhysiologySwitches,
+  ReelView,
+  ServerMsg,
+  WorldSettingsState,
+} from './protocol'
 import { $, button, el, query } from './dom'
 import { newId } from './ids'
 import { gameIcon, iconLabel } from './game/icons'
@@ -8,7 +15,13 @@ import { isTouch } from './platform'
 
 export const DEFAULT_WORLDVIEW = '这是一个宁静的小镇。居民相互认识，各自安排日常生活。'
 
-/** 一个世界设定控制器，同时服务首次进入和设定中心，后端是唯一状态来源。 */
+/** 世界观面板在哪儿打开：电脑和手机都是地图左上角的「世界观」（菜单里也有） */
+export function townEntryHint() {
+  return '点左上角的「世界观」'
+}
+
+/** 一个世界设定控制器，同时服务首次进入的世界观对话框、时钟牌下的世界状态标签和世界观面板，
+ *  后端是唯一状态来源。 */
 export function createWorldSettings(
   send: (msg: ClientMsg) => void,
   mapName: string,
@@ -20,6 +33,8 @@ export function createWorldSettings(
 ) {
   const fallback = suggested || DEFAULT_WORLDVIEW
   let state: WorldSettingsState | undefined
+  /** 录下的几卷和正在录的那一卷；连上后读一次，之后跟着广播更新 */
+  let recordings: { reels: ReelView[]; live?: string } | undefined
   let online = false
   let pending: { id: string; done: (ok: boolean, message: string) => void } | undefined
   const listeners = new Set<() => void>()
@@ -29,11 +44,12 @@ export function createWorldSettings(
   flag.id = 'world-mode'
   flag.className = 'world-mode'
   flag.textContent = '读取世界设定…'
-  $('world-facts').after(flag)
+  // 挂在时钟牌下面，和断线、全镇暂停的提示排在一起
+  $('hud-flags').append(flag)
   const dialog = document.createElement('dialog')
   dialog.className = 'world-setup'
   dialog.id = 'world-setup'
-  dialog.innerHTML = `<form><p class="eyebrow">开始一个新世界</p><h1></h1><p>写给村民看的背景，他们会照着生活。可以先用默认的，以后在设定里改。</p>
+  dialog.innerHTML = `<form><p class="eyebrow">开始一个新世界</p><h1></h1><p>写给村民看的背景，他们会照着生活。可以先用默认的，以后${townEntryHint()}改。</p>
     <label for="first-worldview">世界观</label><textarea id="first-worldview" rows="7" maxlength="6000"></textarea>
     <p class="hint">世界观决定村民怎么想、怎么说，变不出小镇里没有的东西。</p>
     <p class="world-save-status" role="status">正在读取世界设定…</p><div class="world-setup-actions"><a href="./">返回选择小镇</a><button type="submit" class="primary">保存世界观</button></div></form>`
@@ -65,14 +81,14 @@ export function createWorldSettings(
             ? '测试模式'
             : 'AI 自主生活'
     if (game) iconLabel(flag, 'spark', flag.textContent ?? '世界设定', true)
-    // 2D 顶栏只在不寻常的状态下显示这个标签；正常的 AI 自主生活不占顶栏位置。
-    // 断开时也不显示：顶栏的连接状态和地图上的提示已经写了正在重新连接
+    // 只在不寻常的状态下显示这个标签；正常的 AI 自主生活不占地方。
+    // 断开时也不显示：时钟牌下的连接状态和地图上的提示已经写了正在重新连接
     const normal = online && !!state?.ready && !state.mock
     flag.hidden = !game && (normal || !online)
     flag.title = state?.mock
-      ? '固定回复 · 测试模式：村民用固定回复，不调用模型。村民模型在各自设定页单独配置；点击查看世界设定'
+      ? '固定回复 · 测试模式：村民用固定回复，不调用模型。点开看这一局的设定'
       : state?.ready
-        ? '村民模型在各自设定页单独配置；点击查看世界设定'
+        ? '点开看这一局的设定：世界观、规则'
         : '设置世界观后才能推进时间'
     document
       .querySelectorAll<HTMLButtonElement>('#speeds button')
@@ -105,6 +121,58 @@ export function createWorldSettings(
     pending = { id, done }
     notify()
     send(build(state, id))
+  }
+  /** 陌生环境开关：世界观面板规则的第一项，切换就保存；显示值始终来自后端回读 */
+  function strangersSwitch() {
+    const root = el('section', '', 'physiology-switches town-rule')
+    const row = el('label', '', 'physiology-row')
+    const input = el('input')
+    input.type = 'checkbox'
+    input.id = 'town-strangers'
+    input.setAttribute('role', 'switch')
+    row.htmlFor = input.id
+    const description = el('small')
+    const text = el('span', '', 'physiology-text')
+    text.append(el('b', '村民初来乍到'), description)
+    row.append(input, text)
+    const status = el('p', '', 'physiology-status')
+    status.setAttribute('role', 'status')
+    root.append(
+      row,
+      el(
+        'p',
+        '适合荒岛、野地这类新地方。切换就保存；世界会暂停，村民重新观察。',
+        'physiology-note'
+      ),
+      status
+    )
+    function render() {
+      input.checked = !!state?.strangers
+      input.disabled = !state || !online || !!pending
+      row.classList.toggle('off', !input.checked)
+      description.textContent = input.checked
+        ? '只知道眼下所在的地方和家，别处要顺着路走过去才知道。'
+        : '知道每个地方在哪、能做什么。'
+    }
+    input.addEventListener('change', () => {
+      status.textContent = '正在保存…'
+      submit(
+        (current, id) => ({
+          type: 'set_strangers',
+          request_id: id,
+          world_id: current.world_id,
+          enabled: input.checked,
+        }),
+        (ok, message) => {
+          status.textContent = ok ? `✓ ${message}` : message
+          render()
+        }
+      )
+      render()
+    })
+    listeners.add(render)
+    render()
+    return root
   }
   function save(text: string, revision: number, done: Done) {
     if (!text.trim()) {
@@ -192,6 +260,44 @@ export function createWorldSettings(
         done
       )
     },
+    /** 打开玩法（预制小镇开局时用）；回执同其他设定 */
+    saveGameMode(choice: GameModeChoice, done: Done) {
+      submit(
+        (current, id) => ({
+          type: 'set_game_mode',
+          request_id: id,
+          world_id: current.world_id,
+          game_mode: choice,
+        }),
+        done
+      )
+    },
+    /** 录下的几卷和正在录的那一卷；还没读到时为空 */
+    recordings: () => recordings,
+    /** 打开或关掉录像：切换就保存，不带修订号，世界不暂停 */
+    saveRecording(enabled: boolean, done: Done) {
+      submit(
+        (current, id) => ({
+          type: 'set_recording',
+          request_id: id,
+          world_id: current.world_id,
+          enabled,
+        }),
+        done
+      )
+    },
+    /** 删掉录完的一卷 */
+    deleteRecording(reel: string, done: Done) {
+      submit(
+        (current, id) => ({
+          type: 'delete_recording',
+          request_id: id,
+          world_id: current.world_id,
+          reel,
+        }),
+        done
+      )
+    },
     /** 打开或关掉化身神力：切换就保存，不带修订号，世界不暂停 */
     saveMiracles(enabled: boolean, done: Done) {
       submit(
@@ -204,12 +310,27 @@ export function createWorldSettings(
         done
       )
     },
-    setOpenSettings(open: () => void) {
+    /** 改气候：切换就保存，不带修订号，世界不暂停 */
+    saveClimate(climate: Climate, done: Done) {
+      submit(
+        (current, id) => ({
+          type: 'set_climate',
+          request_id: id,
+          world_id: current.world_id,
+          climate,
+        }),
+        done
+      )
+    },
+    /** 时钟牌下的世界状态标签（待设置世界观、测试模式）点开世界观面板 */
+    setOpenTown(open: () => void) {
       flag.onclick = open
     },
+    strangersSwitch,
     connected() {
       online = true
       send({ type: 'get_world_settings' })
+      send({ type: 'get_recordings' })
       notify()
     },
     disconnected() {
@@ -226,7 +347,13 @@ export function createWorldSettings(
         state = undefined
         first.value = fallback
         send({ type: 'get_world_settings' })
+        send({ type: 'get_recordings' })
         notify()
+      }
+      if (msg.type === 'recordings') {
+        recordings = { reels: msg.reels, live: msg.live }
+        notify()
+        return true
       }
       if (msg.type === 'world_settings') {
         if (
@@ -235,7 +362,7 @@ export function createWorldSettings(
         )
           onChanged()
         state = msg.state
-        if (!state.ready) firstStatus.textContent = '世界已暂停。保存后，点顶栏的开始运行。'
+        if (!state.ready) firstStatus.textContent = '世界已暂停。保存后，点左上角的 ▶ 开始运行。'
         notify()
         return true
       }
@@ -258,55 +385,111 @@ export function createWorldSettings(
       }
       return false
     },
-    page(onDirty: () => void): SettingsPage {
-      const el = document.createElement('section')
-      el.className = 'world-settings-page'
-      el.innerHTML = `<h2>世界观</h2><p>设定只属于当前运行世界；修改会暂停世界、取消旧安排，并更新所有村民的 AI 上下文。</p>
-        <label for="edit-worldview">世界观</label><textarea id="edit-worldview" rows="12" maxlength="6000"></textarea>
-        <p class="hint">已有经历与记忆保留。世界观描述不会生成道具，也不会改写饥饿、疾病等生理机制。</p>
-        <p class="world-save-status" role="status"></p>`
-      const text = query<HTMLTextAreaElement>(el, 'textarea'),
-        status = query(el, '[role=status]')
+    /** 世界观面板里的世界观：平时只读，点「编辑」就地改。草稿只在本地；修订号变了但世界观没变
+     *  （生理、神力也共用修订号）时草稿照旧能存，世界观在别处真改过了才提醒。 */
+    worldviewSection() {
+      const root = el('section', '', 'town-section town-worldview')
+      const caption = el('div', '', 'town-caption')
+      const edit = button('编辑', () => startEditing(), 'town-link')
+      caption.append(el('h3', '世界观'), edit)
+      const view = el('p', '', 'town-worldview-text')
+      const form = el('div', '', 'town-worldview-form')
+      const label = el('label', '世界观', 'nb-sr-only')
+      const text = el('textarea')
+      text.id = 'town-worldview'
+      text.rows = 9
+      text.maxLength = 6000
+      text.spellcheck = false
+      label.htmlFor = text.id
+      const actions = el('div', '', 'town-actions')
+      const cancelButton = button('放弃', () => discard())
+      const saveButton = button('保存', () => submitText(), 'primary')
+      actions.append(cancelButton, saveButton)
+      form.append(
+        label,
+        text,
+        el(
+          'p',
+          '已有经历与记忆保留。世界观不会生成道具，也不会改写饥饿、疾病等生理机制。',
+          'town-hint'
+        ),
+        actions
+      )
+      const note = el('p', '改了会暂停世界、取消旧安排，村民按新的背景重新想。', 'town-hint')
+      const status = el('p', '', 'town-status')
+      status.setAttribute('role', 'status')
+      root.append(caption, view, form, note, status)
       let base = '',
         revision = -1,
-        world = ''
-      const dirty = () => text.value !== base
+        world = '',
+        editing = false
+      const dirty = () => editing && text.value !== base
+      function render() {
+        view.hidden = editing
+        form.hidden = !editing
+        edit.hidden = editing
+        const locked = !online || !state || !!pending
+        edit.disabled = locked
+        text.disabled = locked
+        saveButton.disabled = locked || !text.value.trim() || text.value === base
+        cancelButton.disabled = !!pending
+      }
       function read() {
+        const clean = text.value === base
         base = state?.worldview ?? ''
-        text.value = base
         revision = state?.revision ?? -1
         world = state?.world_id ?? ''
-        status.textContent = ''
-        onDirty()
+        if (!editing || clean) text.value = base
+        view.textContent = base || '还没有写世界观'
+        render()
       }
-      text.oninput = onDirty
+      function startEditing() {
+        editing = true
+        text.value = base
+        status.textContent = ''
+        render()
+        text.focus()
+      }
+      /** 放弃草稿，顺手读一遍后端现在的世界观（在别处改过时看到的就是新的） */
+      function discard() {
+        editing = false
+        status.textContent = ''
+        read()
+      }
+      function submitText() {
+        status.textContent = '正在保存…'
+        save(text.value, revision, (ok, message) => {
+          if (ok) {
+            editing = false
+            read()
+          }
+          status.textContent = message
+          render()
+        })
+        render()
+      }
+      text.oninput = render
       listeners.add(() => {
-        if (!state) return
-        if (world !== state.world_id || (!dirty() && revision !== state.revision)) read()
-        else if (revision !== state.revision && !pending)
-          status.textContent = '设定已在其他页面更新；你的草稿保留。点「放弃」读取新内容。'
-        text.disabled = !online || !!pending
-      })
-      return {
-        id: 'worldview',
-        group: 'town',
-        navLabel: '世界观',
-        title: '世界观',
-        el,
-        isDirty: dirty,
-        discard: read,
-        onShow: () => {
+        if (state && world !== state.world_id) {
+          // 换了世界（重置）：旧草稿作废
+          editing = false
+          status.textContent = ''
+          read()
+          return
+        }
+        if (state && revision !== state.revision) {
           if (!dirty()) read()
-          if (online) send({ type: 'get_world_settings' })
-        },
-        save() {
-          status.textContent = '正在保存…'
-          save(text.value, revision, (ok, message) => {
-            if (ok) read()
-            status.textContent = message
-            onDirty()
-          })
-        },
+          else if (state.worldview === base) revision = state.revision
+          else if (!pending)
+            status.textContent = '世界观在别处改过了；你的草稿还在，点「放弃」看新的。'
+        }
+        render()
+      })
+      read()
+      return {
+        el: root,
+        isDirty: dirty,
+        discard,
       }
     },
   }

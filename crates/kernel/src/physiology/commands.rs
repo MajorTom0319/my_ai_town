@@ -69,20 +69,7 @@ impl World {
             }
             let was = self.actors[&id].needs.abilities();
             let (urgent, notices) = self.actor_mut(&id).needs.advance(&r, dt);
-            let a = &self.actors[&id];
-            if urgent
-                && a.actions.agent_controlled
-                && (a.current.interaction.is_some()
-                    || a.actions
-                        .groups
-                        .values()
-                        .any(|g| g.status == protocol::GroupStatus::Running))
-            {
-                self.interrupt_actions(&id, "身体需求紧急，重新考虑当前安排");
-            }
-            for notice in notices {
-                self.body_event(&id, BodyEventKind::Pressure, "生理变化", notice, None);
-            }
+            self.body_pressure(&id, urgent, notices);
             if self.actors[&id].needs.body.wet >= super::WET_LIMIT - 1e-8 {
                 self.actor_mut(&id).needs.body.wet = 0.0;
                 // 健康机制关闭时不会积累淋湿进度，这里一定能施加。
@@ -99,6 +86,83 @@ impl World {
         }
     }
 
+    /// 需求跨线的结果：紧急时打断 Agent 正在执行的安排或互动，再把提醒记成生命事件。
+    fn body_pressure(&mut self, id: &str, urgent: bool, notices: Vec<String>) {
+        let a = &self.actors[id];
+        if urgent
+            && a.actions.agent_controlled
+            && (a.current.interaction.is_some()
+                || a.actions
+                    .groups
+                    .values()
+                    .any(|g| g.status == protocol::GroupStatus::Running))
+        {
+            self.interrupt_actions(id, "身体需求紧急，重新考虑当前安排");
+        }
+        for notice in notices {
+            self.body_event(id, BodyEventKind::Pressure, "生理变化", notice, None);
+        }
+    }
+
+    /// 观察者调身体数值（村民卡片上的「调整」，host 只在世界暂停时放行）。这不是世界里发生的事：
+    /// 本人的经历和身体记录里都不留痕，只在观察日志记一笔。跨过提醒线、崩溃线照常提醒和打断，
+    /// 能力变化照常结算，和一路饿到这里看不出区别。健康最少留 1，死者要先复活。返回给观察者的一句结果。
+    pub fn adjust_body(&mut self, id: &str, values: NeedValues<Option<f64>>) -> Result<String> {
+        check_values(values)?;
+        ensure!(
+            values.health.is_none_or(|h| h >= 1.0),
+            KernelError::physiology("健康最少留 1；人死要在世界里发生")
+        );
+        let a = self
+            .actors
+            .get(id)
+            .ok_or_else(|| KernelError::NoSuchActor(id.into()))?;
+        ensure!(!a.is_avatar(), KernelError::physiology("化身的身体不用调"));
+        ensure!(
+            !a.needs.body.dead,
+            KernelError::physiology(format!("{}已经死了，先复活再调", a.name))
+        );
+        for need in Need::ALL {
+            ensure!(
+                values[need].is_none() || a.needs.on(need),
+                KernelError::physiology(format!("这个世界关掉了{}", need.label()))
+            );
+        }
+        let old = NeedValues {
+            fullness: a.needs.fullness.value,
+            energy: a.needs.energy.value,
+            water: a.needs.water.value,
+            health: a.needs.health.value,
+        };
+        let changes: Vec<String> = Need::ALL
+            .into_iter()
+            .filter_map(|need| {
+                let v = values[need]?;
+                Some(format!("{} {:.0} → {v:.0}", need.label(), old[need]))
+            })
+            .collect();
+        ensure!(
+            !changes.is_empty(),
+            KernelError::physiology("没有要调的数值")
+        );
+        let name = a.name.clone();
+        let was = a.needs.abilities();
+        let n = &mut self.actor_mut(id).needs;
+        n.set_values(values)?;
+        let (urgent, notices) = n.note_adjusted(old);
+        self.body_pressure(id, urgent, notices);
+        let a = &self.actors[id];
+        if a.needs.abilities() != was {
+            let spot = body_spot(self, a);
+            let source = a.needs.causes(spot).join("；");
+            self.reconcile_body(id, was, &source, DeathCause::default());
+        }
+        let text = format!("观察者调整了{name}的身体：{}", changes.join("，"));
+        let info = self.actors[id].event_info();
+        self.log(info, text.clone());
+        Ok(text)
+    }
+
     /// 生命事件进历史、日记和观察日志；alert 是需要提示卡时的细节。
     pub(crate) fn body_event(
         &mut self,
@@ -108,9 +172,21 @@ impl World {
         text: String,
         alert: Option<Alert>,
     ) {
+        self.record_body_event(id, kind, source, text, alert, true);
+    }
+
+    fn record_body_event(
+        &mut self,
+        id: &str,
+        kind: BodyEventKind,
+        source: &str,
+        text: String,
+        alert: Option<Alert>,
+        fact: bool,
+    ) {
         let now = self.minutes;
         let a = self.actor_mut(id);
-        let log = a.body_event(now, kind, source, text, alert.clone());
+        let log = a.body_event(now, kind, source, text, alert.clone(), fact);
         let info = a.event_info().with_alert(alert);
         self.log(info, log);
     }
@@ -304,7 +380,13 @@ impl World {
             .action
             .as_ref()
             .and_then(|b| b.draft.recipient.clone());
-        let source: String = format!("{}使用{}／{}", a.name, spot.prop_name, action.label)
+        // 给自己用时句子里不写自己的名字：这些句子会进本人的经历，第三人称的「林晚使用……
+        // 林晚饱腹恢复」会让村民把自己当成另一个人。给别人用时照写，对方要知道是谁。
+        let user = match &recipient {
+            Some(r) if r != id => a.name.as_str(),
+            _ => "",
+        };
+        let source: String = format!("{user}使用{}／{}", spot.prop_name, action.label)
             .chars()
             .take(240)
             .collect();
@@ -312,8 +394,12 @@ impl World {
         check_body_use(self, id, &locale, &spot.prop, &action, recipient.as_deref())?;
         let target = recipient.unwrap_or_else(|| id.to_string());
         let was = self.actors[&target].needs.abilities();
+        let health_before = self.actors[&target]
+            .needs
+            .track(crate::props::Need::Health)
+            .value;
         let key = format!("{}/{}@{}", spot.prop, action.id, self.minutes.to_bits());
-        let (effects, misses) = self.roll_effects(&action.on_complete);
+        let (effects, misses) = self.roll_effects(id, &action.on_complete);
         self.check_made_items(id, &effects, &key)?;
         // 以上检查都通过才改世界；产出在消耗之前，放不下道具时什么都没用掉。
         let mut changes = self.make_things(id, &effects, &key)?;
@@ -322,7 +408,7 @@ impl World {
             changes.push(crate::outcome::supply_used(s.cost, remaining));
         }
         changes.extend(self.use_up_requirements(id, &action));
-        changes.extend(self.apply_instant_effects(&target, &effects, &source)?);
+        changes.extend(self.apply_instant_effects(id, &target, &effects, &source)?);
         changes.extend(misses);
         if action.consumes_item {
             self.consume_carried_prop(&spot.prop);
@@ -351,12 +437,30 @@ impl World {
         if attacked && self.actors[&target].needs.body.dead {
             changes.push(crate::outcome::killed(&self.actors[&target].name));
         }
-        self.body_event(
+        // 拿道具伤了别人：告诉开着的玩法（战报）
+        if target != id && action.harms() {
+            let (me, them) = (&self.actors[id].name, &self.actors[&target].name);
+            let lost = health_before
+                - self.actors[&target]
+                    .needs
+                    .track(crate::props::Need::Health)
+                    .value;
+            let mut text = format!("{me}{}{them}，健康 −{lost:.0}", action.label);
+            if self.actors[&target].needs.body.dead {
+                text.push_str(&format!("，{them}倒下了"));
+            }
+            self.game_mode_clash(id, &target, &text);
+        }
+        // 自己用道具：这些变化已经写在自己的动作结果里，身体事件只进身体记录和当天流水，
+        // 不再给本人另记一条事实，免得一次吃饭在经历里出现好几回。
+        let reported = target == id && self.actors[id].current.action.is_some();
+        self.record_body_event(
             &target,
             BodyEventKind::Prop,
             &source,
             format!("{source}：{}", changes.join("；")),
             None,
+            !reported,
         );
         if target != id {
             let received = if action.harms() { "遭到" } else { "接受" };
@@ -375,22 +479,25 @@ impl World {
     }
 
     /// 身体效果与后续安排；产出物品和建道具已在 `make_things` 里做完。
+    /// 作用在使用者自己身上时，句子里不写名字（见 finish_body_use）。
     fn apply_instant_effects(
         &mut self,
+        user: &str,
         target: &str,
         effects: &[InstantEffect],
         source: &str,
     ) -> Result<Vec<String>> {
+        let name = if target == user {
+            String::new()
+        } else {
+            self.actors[target].name.clone()
+        };
         let mut changes = Vec::new();
         for e in effects {
             match e {
                 InstantEffect::Restore { need, amount } => {
                     let gained = self.actor_mut(target).needs.restore(*need, *amount);
-                    changes.push(crate::outcome::restored(
-                        &self.actors[target].name,
-                        *need,
-                        gained,
-                    ));
+                    changes.push(crate::outcome::restored(&name, *need, gained));
                 }
                 // 健康机制关闭时，状况既不新增也不解除。
                 InstantEffect::ApplyCondition { .. } | InstantEffect::CureCondition { .. }
@@ -409,11 +516,7 @@ impl World {
                 // 只扣健康；死没死、是不是遇害，由 finish_body_use 随后统一结算。
                 InstantEffect::Harm { amount, wound } => {
                     let lost = self.actor_mut(target).needs.lose_health(*amount);
-                    changes.push(crate::outcome::harmed(
-                        &self.actors[target].name,
-                        wound,
-                        lost,
-                    ));
+                    changes.push(crate::outcome::harmed(&name, wound, lost));
                 }
                 InstantEffect::Revive {
                     values,

@@ -35,6 +35,10 @@ export function spec(c: CreatorContext): Spec {
     },
     resources: c.select('town-resources').value,
     terrain_source: 'auto',
+    // 街道是默认值，不写进参数：旧参数和新参数生成同一张图
+    ...(c.select('town-settlement').value !== 'town'
+      ? { settlement: c.select('town-settlement').value as 'wild' | 'ring' }
+      : {}),
     places,
     ...(Object.keys(names).length ? { names } : {}),
     constraints: c.languageMode
@@ -68,8 +72,7 @@ export function syncResourceEffect(c: CreatorContext) {
 
 /** 检查参数里的地点种类和数量，超出上限就抛出说明 */
 function checkPlaces(c: CreatorContext, s: EditableSpec) {
-  const { templates } = c.options!
-  const limits = c.options!.limits
+  const { templates, limits } = c.options
   // Old saved/model-generated specs may still contain size. The picker merges them by kind;
   // the next preview recalculates compatible internal groups automatically.
   const groups = new Map<string, number>()
@@ -96,7 +99,6 @@ function checkPlaces(c: CreatorContext, s: EditableSpec) {
 
 /** 把一份参数写回表单（一句话规划、编辑完整要求）；参数不合法时抛出说明 */
 export function fill(c: CreatorContext, s: EditableSpec) {
-  if (!c.options) return
   if (s.view_mode !== undefined && s.view_mode !== '2d')
     throw Error('仅支持 HD-2D，独立 3D 版本已停用')
   checkPlaces(c, s)
@@ -111,6 +113,7 @@ export function fill(c: CreatorContext, s: EditableSpec) {
   if (!name.dataset.edited) name.value = s.name
   c.input('town-seed').value = String(s.seed)
   c.select('town-resources').value = s.resources
+  c.select('town-settlement').value = s.settlement ?? 'town'
   c.picker?.set(s.places)
   c.parsedConstraints = s.constraints
   c.parsedNames = s.names ?? {}

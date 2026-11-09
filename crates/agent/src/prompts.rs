@@ -10,9 +10,10 @@ const REFLECTION_RULES: &str = include_str!("../prompts/resident_reflection.txt"
 /// 交谈轮次的规则：轮到本人发言时的单次请求。占位符：unchanged_rule。
 const CHAT_RULES: &str = include_str!("../prompts/resident_chat.txt");
 
-/// 生活观察与交谈状态共用的「只发变化」说明。
+/// 生活观察与交谈状态共用的「只发变化」说明。发出前没有值的小项不写（context::clean），
+/// 所以要说清：省略只说的是整个状态字段，出现了的字段里没写的项就是没有。
 const UNCHANGED_RULE: &str =
-    "状态字段只在变化时出现；没出现的字段与本会话上一次发给你的相同，不代表消失或为空。";
+    "状态字段只在变化时出现；没出现的字段与本会话上一次发给你的相同，不代表消失或为空。出现了的字段是完整的，里面没写的项就是没有。";
 
 /// 把文本里的 `{名字}` 换成对应的值。
 fn fill(template: &str, values: &[(&str, &str)]) -> String {
@@ -71,8 +72,13 @@ pub const STALE_AFTER_NOTICE: &str = "请求期间收到重要通知，请先重
 
 /// 静态地图里的基础动作说明；「前往」的参数写法只在这里说明。
 pub const GO_PARAMETERS: &str =
-    "intent.locale 填 known_places.id；不填 target 和 prop_id，地名不拼进 verb";
-pub const STAY_PARAMETERS: &str = "intent.duration_minutes 填分钟数";
+    "intent.locale 填 known_places.id，没去过的地方填 exits 里的 to；不填 target 和 prop_id，地名不拼进 verb";
+pub const STAY_PARAMETERS: &str =
+    "intent.duration_minutes 填分钟数；想坐着或躺着歇就把 verb 写成「坐下」「躺下」，参数一样，不算睡觉；想换个位置待着（比如水边），intent.target 填观察里 spots 的 id，会先走过去";
+pub const SEARCH_PARAMETERS: &str =
+    "不填别的参数；在原地花 20 分钟翻找藏着的东西，有一定可能找到，回执写明找到了什么";
+pub const HIDE_PARAMETERS: &str =
+    "prop_id 填自己随身带着的一件东西；把它藏在这里，只有自己和当时看见的人知道，别人要搜寻才找得到";
 pub const LOOK_PARAMETERS: &str =
     "不填别的参数；在原地花几分钟把眼前的东西和人看清，回执逐一写明，没写到的就是这里没有";
 
@@ -109,6 +115,88 @@ pub const SUMMARY_THOUGHT_PREFIX: &str = "当时的自述（不作为世界事�
 pub fn summary_reading(event_id: &serde_json::Value) -> String {
     format!("已访问阅读结果 #{event_id}；需要正文时主动调用 read_content，记忆由本人决定。")
 }
-pub fn summary_tool(call_id: &str, name: &str, excerpt: &str) -> String {
-    format!("工具 {call_id} 的结果摘录（{name}）：{excerpt}")
+/// 一组动作的结果：「D1 08:13 动作：停留，完成；在潮池摸鱼，没做成（道具正被其他村民使用）」。
+pub fn summary_actions(clock: &str, steps: &[String]) -> String {
+    format!("{clock} 动作：{}", steps.join("；"))
+}
+/// 动作组里一项动作：动词、结果，有变化或原因时接在后面。
+pub fn summary_step(verb: &str, status: &str, changes: &[&str], reason: Option<&str>) -> String {
+    let mut text = format!("{verb}，{}", action_status(status));
+    if !changes.is_empty() {
+        text.push('：');
+        text.push_str(&changes.join("，"));
+    }
+    if let Some(reason) = reason {
+        text.push_str(&format!("（{reason}）"));
+    }
+    text
+}
+fn action_status(status: &str) -> &str {
+    match status {
+        "succeeded" => "完成",
+        "failed" => "没做成",
+        "interrupted" => "被打断",
+        "cancelled" => "取消了",
+        "running" => "还在做",
+        other => other,
+    }
+}
+/// 记下或改了目标。
+pub fn summary_goal(title: &str, status: &str, reason: Option<&str>) -> String {
+    let status = match status {
+        "active" => "进行中",
+        "paused" => "暂停",
+        "completed" => "完成",
+        "abandoned" => "放弃",
+        "failed" => "失败",
+        other => other,
+    };
+    match reason {
+        Some(reason) => format!("目标「{title}」：{status}；{reason}"),
+        None => format!("目标「{title}」：{status}"),
+    }
+}
+/// 邀请、交谈、同行这些互动当时的状态。
+pub fn summary_interaction(kind: &str, status: &str, last_change: Option<&str>) -> String {
+    let status = match status {
+        "offered" => "等对方回应",
+        "running" => "进行中",
+        "succeeded" => "完成了",
+        "declined" => "对方没答应",
+        "cancelled" => "取消了",
+        "expired" => "没等到回应",
+        "interrupted" => "被打断",
+        other => other,
+    };
+    match last_change {
+        Some(change) => format!("{kind}：{status}，{change}"),
+        None => format!("{kind}：{status}"),
+    }
+}
+/// 等待结束：到点了，还是等到了事。
+pub fn summary_wait(clock: &str, by_event: bool) -> String {
+    if by_event {
+        format!("{clock} 等到了动静")
+    } else {
+        format!("{clock} 等到了点")
+    }
+}
+/// 玩法里交的选择。
+pub fn summary_mode(text: &str) -> String {
+    format!("玩法：{text}")
+}
+/// 调用没成：哪类事、为什么。
+pub fn summary_failed(tool: &str, error: &str) -> String {
+    let what = match tool {
+        "run_actions" => "动作",
+        "offer_invitation" => "发邀请",
+        "reply_invitation" => "回应邀请",
+        "interact" => "交谈里的操作",
+        "set_goal" => "记目标",
+        "wait_for" => "等待",
+        "mode_action" => "玩法里的选择",
+        "read_content" => "回看读过的内容",
+        _ => "查询",
+    };
+    format!("{what}没成：{error}")
 }

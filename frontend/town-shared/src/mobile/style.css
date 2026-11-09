@@ -1,12 +1,10 @@
-/* 手机布局（≤719px）：地图占满，顶栏只留返回、时间、天气和开始/暂停钮；其余入口收进底部五格。
-   村民卡、事件列表、「更多」是底部抽屉。宽屏不受影响：这里新加的节点在宽屏一律隐藏。
+/* 手机布局（≤719px）：地图占满，左上是和电脑一样的时钟牌、开始钮、世界观（shell/hud.css）；其余入口在底部六格。
+   村民卡、事件列表、菜单是底部抽屉。宽屏不受影响：这里新加的节点在宽屏一律隐藏。
    触屏另有一组规则（[data-input='touch']），按钮和可点范围更大。 */
 
 .mobile-dock,
 .map-fabs,
-.m-sheet-handle,
-.m-pop,
-.m-shade {
+.m-sheet-handle {
   display: none;
 }
 
@@ -100,20 +98,6 @@ html[data-empty-town] .mobile-dock [data-dock='residents'] {
   body:not(.game-theme) #avatar-flag {
     display: none;
   }
-  /* 音乐、音效开关不占顶栏：设定的「声音与按键」里有，手机在「更多」里 */
-  #topbar > #audio-controls {
-    display: none;
-  }
-  /* 「← 地图选择」只留箭头，给镇名和右边的入口让出位置（手机布局下面另有尺寸） */
-  .back-to-maps {
-    padding-inline: 6px;
-    font-size: 0;
-    color: var(--text-2);
-  }
-  .back-to-maps::before {
-    content: '←';
-    font-size: 18px;
-  }
 }
 
 @media (max-width: 719px) {
@@ -124,167 +108,6 @@ html[data-empty-town] .mobile-dock [data-dock='residents'] {
   #obs-view,
   .page-view {
     height: 100dvh;
-  }
-
-  /* ---------- 顶栏 ---------- */
-  #topbar {
-    flex-wrap: nowrap;
-    gap: 6px;
-    min-height: 52px;
-    padding: 0 10px 0 2px;
-    overflow: hidden;
-  }
-  #topbar
-    > :is(
-      #app-title,
-      #audio-controls,
-      #avatar-flag,
-      #open-residents,
-      #open-usage,
-      #open-settings,
-      #open-help,
-      #model-flag,
-      #world-mode
-    ) {
-    display: none;
-  }
-  /* 「← 地图选择」只留箭头 */
-  .back-to-maps {
-    width: 40px;
-    height: 40px;
-    flex: none;
-    padding: 0;
-    font-size: 0;
-    color: var(--text-2);
-  }
-  .back-to-maps::before {
-    content: '←';
-    font-size: 20px;
-  }
-  #clock {
-    font-size: 15px;
-  }
-  #world-facts {
-    font-size: 12px;
-    color: var(--text-2);
-  }
-  .weather-trigger {
-    min-height: 30px;
-    padding: 0 10px;
-    border: 0;
-    border-radius: var(--r-pill);
-    background: var(--surface-sunken);
-    font-size: 13px;
-  }
-  /* 额度或故障暂停的原因：顶栏放不下，挂在顶栏下面 */
-  #hold-flag {
-    position: absolute;
-    top: 58px;
-    left: 12px;
-    right: 12px;
-    z-index: 15;
-    max-width: none;
-    padding: 6px 12px;
-    border-radius: var(--r-s);
-    background: var(--danger-soft);
-    white-space: normal;
-  }
-  #conn-text:empty {
-    display: none;
-  }
-  /* 开始/暂停钮挨着时间，只留图标 */
-  .speed-toggle {
-    width: 44px;
-    min-width: 0;
-    height: 36px;
-    padding: 0;
-  }
-  .speed-toggle span {
-    display: none;
-  }
-  .speed-toggle .game-icon {
-    width: 18px;
-    height: 18px;
-  }
-
-  /* ---------- 浮层：「更多」 ---------- */
-  .m-pop:not([hidden]) {
-    display: block;
-    position: absolute;
-    z-index: 40;
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: var(--r-m);
-    box-shadow: var(--elev-3);
-  }
-  .m-pop-title {
-    grid-column: 1 / -1;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-3);
-  }
-  .m-pop-note {
-    grid-column: 1 / -1;
-    margin: 2px 0 0;
-    font-size: 12px;
-    color: var(--text-3);
-  }
-  .m-shade:not([hidden]) {
-    display: block;
-    position: absolute;
-    inset: 0;
-    z-index: 39;
-    background: rgb(20 24 22 / 0.32);
-  }
-  .m-more:not([hidden]) {
-    left: 0;
-    right: 0;
-    bottom: 0;
-    padding: 0 16px 16px;
-    border-radius: var(--r-m) var(--r-m) 0 0;
-    border-bottom: 0;
-  }
-  .m-grip {
-    width: 36px;
-    height: 4px;
-    margin: 8px auto 6px;
-    border-radius: 2px;
-    background: var(--line);
-  }
-  .m-more h2 {
-    margin: 4px 0 12px;
-    font-size: 17px;
-  }
-  .m-tiles {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-  }
-  .m-tile {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    height: 84px;
-    border-radius: var(--r-m);
-    font-size: 13px;
-  }
-  .m-tile .game-icon {
-    width: 22px;
-    height: 22px;
-    color: var(--text-2);
-  }
-  .m-tile small {
-    font-size: 12px;
-    color: var(--text-3);
-    line-height: 1;
-  }
-  .m-row {
-    width: 100%;
-    min-height: 48px;
-    margin-top: 12px;
-    text-align: left;
   }
 
   /* ---------- 底部六个入口 ---------- */
@@ -312,9 +135,13 @@ html[data-empty-town] .mobile-dock [data-dock='residents'] {
     color: var(--text-2);
     font-size: 12px;
   }
-  .mobile-dock button .game-icon {
-    width: 22px;
-    height: 22px;
+  .mobile-dock button .pixel-icon {
+    width: 32px;
+    height: 32px;
+  }
+  /* 停用的入口（比如还不能进化身）：像素图标也跟着淡下去 */
+  .mobile-dock button:disabled .pixel-icon {
+    opacity: 0.4;
   }
   /* 新作品的数字贴在图标右上角 */
   .mobile-dock .ui-count {
@@ -330,7 +157,7 @@ html[data-empty-town] .mobile-dock [data-dock='residents'] {
     display: none;
   }
 
-  /* ---------- 事件：一行最新事件浮在入口上方，展开成底部抽屉 ---------- */
+  /* ---------- 事件：最近两条浮在入口上方（样子见 shell/hud.css），展开成底部抽屉 ---------- */
   #event-bar {
     position: absolute;
     left: 12px;
@@ -470,7 +297,8 @@ html[data-empty-town] .mobile-dock [data-dock='residents'] {
   }
 
   /* ---------- 地图上的浮层 ---------- */
-  .map-props-button {
+  /* 道具、进入化身、书报在底部入口里，地图上那一排不显示 */
+  .map-hotbar {
     display: none;
   }
   /* 左右都定位、宽度按内容：不受 left:50% 只剩半屏宽的限制，又不压到右上角的圆钮 */
@@ -553,22 +381,6 @@ html[data-empty-town] .mobile-dock [data-dock='residents'] {
   #settings-nav .nav-item.on {
     background: var(--surface);
     font-weight: 400;
-  }
-  #settings-nav .nav-danger {
-    margin-top: 18px;
-    padding-top: 0;
-    border-top: 0;
-  }
-  .settings-resident-picker {
-    margin: 0 0 8px;
-  }
-  .settings-resident-picker > summary {
-    min-height: 48px;
-  }
-  .settings-resident-menu {
-    position: absolute;
-    display: grid;
-    box-shadow: var(--elev-3);
   }
   #settings-page {
     padding: 14px 16px 24px;
@@ -692,13 +504,6 @@ html[data-empty-town] .mobile-dock [data-dock='residents'] {
     min-width: 0;
   }
   .us-requests td.us-detail:empty {
-    display: none;
-  }
-}
-
-/* 手机布局里「进入化身」在底部入口，地图上的入口钮不再显示 */
-@media (max-width: 719px) {
-  .avatar-enter {
     display: none;
   }
 }
@@ -883,10 +688,6 @@ body:has(.guide:not([hidden])) :is(.pause-hint, .fast-hint) {
 }
 /* 键盘提示（Esc、回车）在触屏上没有意义 */
 [data-input='touch'] .avatar-ui kbd {
-  display: none;
-}
-/* 场景物品钮在左下，化身时正好被摇杆压住；化身有自己的背包 */
-[data-input='touch'].avatar-controlling .map-props-button {
   display: none;
 }
 
@@ -1288,6 +1089,231 @@ body:has(.guide:not([hidden])) :is(.pause-hint, .fast-hint) {
 .guide-foot button {
   min-height: 48px;
   font-size: 15px;
+}
+
+/* ---------- 预制小镇的开局设置：一排选手头像，下面三行设定页同款的设置（settings/controls.css），
+   不再一组一个框；人数加减只点亮、熄灭头像，卡片高度不变，一屏放得下 ---------- */
+.prefab-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.prefab-head {
+  margin-bottom: 18px;
+}
+.prefab-head h2 {
+  margin: 0 0 4px;
+}
+.prefab-head p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.prefab-lineup-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.prefab-lineup-bar h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.prefab-lineup-bar small {
+  font-size: 12px;
+  color: var(--text-3);
+}
+/* 人数：和分段按钮（.ui-seg）同一套外观 */
+.prefab-stepper {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--surface-sunken);
+}
+.prefab-stepper button {
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 16px;
+  line-height: 1;
+}
+.prefab-stepper button:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+.prefab-stepper b {
+  min-width: 3.4em;
+  font-size: 13px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.prefab-players {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px 4px;
+}
+.prefab-player {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 0 4px;
+  border-radius: var(--r-s);
+  transition: opacity var(--t-fast) var(--ease);
+}
+.prefab-player.off {
+  opacity: 0.32;
+}
+.prefab-player.off img {
+  filter: grayscale(1);
+}
+.prefab-face {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 4px;
+  border-radius: 12px;
+  background: var(--surface-sunken);
+  color: var(--text-3);
+  font-size: 18px;
+  font-weight: 600;
+  transition: box-shadow var(--t-fast) var(--ease);
+}
+.prefab-face img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  image-rendering: pixelated;
+}
+/* 号码：头像左上角的小圆牌；住进来了换成对勾，正在请的变橙 */
+.prefab-no {
+  position: absolute;
+  top: -6px;
+  left: -6px;
+  display: grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--accent-fill);
+  box-shadow: 0 0 0 2px var(--surface-page);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.prefab-player.off .prefab-no {
+  background: var(--text-3);
+}
+.prefab-player.joined .prefab-no {
+  background: var(--ok);
+}
+.prefab-player.joining .prefab-no {
+  background: var(--busy);
+}
+.prefab-player b,
+.prefab-player small {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.prefab-player b {
+  font-size: 13px;
+}
+.prefab-player small {
+  min-height: 1.5em;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+/* 能单独换模型的格子：整格盖一个透明下拉框，点开是统一样式的模型列表 */
+.prefab-pick {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.prefab-player:has(.prefab-pick:not(:disabled)):hover .prefab-face,
+.prefab-player:has(.prefab-pick.ui-select-open) .prefab-face {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.prefab-player:has(.prefab-pick:not(:disabled)):hover small,
+.prefab-player:has(.prefab-pick.ui-select-open) small {
+  color: var(--accent-strong);
+}
+.prefab-player:has(.prefab-pick:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.prefab-settings {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.prefab-settings .set-row:last-child {
+  border-bottom: 0;
+}
+.prefab-settings select {
+  max-width: 13em;
+  font-size: 13px;
+}
+.prefab-model {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.prefab-seed-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+input.prefab-seed {
+  width: 8em;
+  height: 26px;
+  padding: 2px 8px;
+  font-variant-numeric: tabular-nums;
+}
+.prefab-status {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+/* 手机竖屏：间距收一点，小屏也一屏放得下 */
+[data-layout='compact'] .prefab-head {
+  margin-bottom: 12px;
+}
+[data-layout='compact'] .prefab-lineup-bar {
+  margin-bottom: 8px;
+}
+[data-layout='compact'] .prefab-players {
+  gap: 6px 4px;
+}
+[data-layout='compact'] .prefab-settings {
+  margin-top: 10px;
+}
+[data-layout='compact'] .prefab-player small {
+  font-size: 11px;
+}
+@media (max-width: 370px) {
+  [data-layout='compact'] .prefab-player small {
+    font-size: 10.5px;
+  }
 }
 
 /* ---------- 一次性提示：深色小卡，箭头指着人或入口 ---------- */

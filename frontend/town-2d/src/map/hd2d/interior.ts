@@ -15,6 +15,7 @@ import { LAMP_GLOW, WALL_CAP } from '../palette'
 // 大厅靠墙立柱子，住处和会客的地方中间铺地毯。地板还是地面图上画的那块。
 // 屋里按家具分布砌一面隔墙分成两间（见 partition.ts），门洞两边立门框。
 // 原点在房屋中心的地面上，和房子外壳同一个位置；墙厚两个像素，砌在占地里面。
+// 灯塔不走这里：掀开后是剖开的灯塔（lighthouse.ts 的 cutaway），这里只给它陈设、名字高度和站位。
 
 const T = 2 * PIXEL
 /** 矮墙高（贴图像素） */
@@ -25,12 +26,15 @@ export function interiorTexels(house: House) {
   return Math.max(14, Math.min(24, Math.round(house.wallTexels * 0.72)))
 }
 
-/** 掀开后墙顶在地图坐标里的 y，名字放在它上面；和 houseTop 同一个折算 */
+/** 掀开后墙顶在地图坐标里的 y，名字放在它上面；和 houseTop 同一个折算。
+ *  灯塔剖开后最高的是塔墙背面，名字放在它上面 */
 export function interiorTop(house: House, tilt: Tilt) {
-  return house.y - (interiorTexels(house) * WALL_TEXEL * tilt.cos) / tilt.sin
+  const rise = (interiorTexels(house) * WALL_TEXEL * tilt.cos) / tilt.sin
+  if (house.tower) return house.y + house.h / 2 - house.tower.foot - rise
+  return house.y - rise
 }
 
-type Rect = (x: number, y: number, w: number, h: number, c: string) => void
+export type Rect = (x: number, y: number, w: number, h: number, c: string) => void
 
 /** 北墙内面：墙纸、护墙板、踢脚线、窗，再按功能加陈设。返回贴图和夜里发光的窗 */
 function backWall(house: House, len: number, height: number) {
@@ -220,15 +224,69 @@ const DECOR: Partial<Record<BuildingKind, Decor>> = {
     rect(c - 4, 4, 8, 6, hash(a, b, seed) < 0.5 ? '#8e3f33' : '#44566e')
     rect(c - 2, 6, 4, 2, '#e8d8a8')
   },
-  lighthouse: (rect, a, b) => {
-    // 船舵
+  lighthouse: (rect, a, b, panelTop, _h, seed) => {
+    // 守塔人的墙：船舵、晴雨表、标着航线的海图、壁灯和放航海日志的小搁板，按位置轮换
     const c = Math.round((a + b) / 2)
-    rect(c - 3, 4, 7, 7, '#6a4a2e')
-    rect(c - 2, 5, 5, 5, '#dfe7ee')
-    rect(c - 1, 6, 3, 3, '#6a4a2e')
-    rect(c, 3, 1, 9, '#6a4a2e')
-    rect(c - 4, 7, 9, 1, '#6a4a2e')
+    const pick = b - a < 13 && seed % 4 === 2 ? 1 : seed % 4
+    if (pick === 0) {
+      rect(c - 3, 4, 7, 7, '#6a4a2e')
+      rect(c - 2, 5, 5, 5, '#dfe7ee')
+      rect(c - 1, 6, 3, 3, '#6a4a2e')
+      rect(c, 3, 1, 9, '#6a4a2e')
+      rect(c - 4, 7, 9, 1, '#6a4a2e')
+    } else if (pick === 1) {
+      rect(c, 2, 1, 1, '#b8913e')
+      rect(c - 2, 3, 5, 1, '#b8913e')
+      rect(c - 3, 4, 7, 5, '#b8913e')
+      rect(c - 2, 9, 5, 1, '#b8913e')
+      rect(c - 2, 4, 5, 5, '#f1ead8')
+      rect(c - 3, 6, 1, 1, '#f1ead8')
+      rect(c + 3, 6, 1, 1, '#f1ead8')
+      rect(c, 6, 1, 1, '#2b282c')
+      rect(c + 1, 5, 1, 1, '#2b282c')
+      rect(c - 1, 8, 3, 1, '#c8453b')
+    } else if (pick === 2) {
+      rect(c - 6, 3, 12, 8, '#6a4a2e')
+      rect(c - 5, 4, 10, 6, '#e8dcc0')
+      rect(c - 5, 4, 4, 6, '#9cc0d6')
+      rect(c - 1, 5, 1, 3, '#9cc0d6')
+      rect(c - 2, 8, 1, 2, '#e8dcc0')
+      for (const [i, j] of [
+        [-4, 5],
+        [-3, 7],
+        [-1, 8],
+        [1, 6],
+        [3, 5],
+      ])
+        rect(c + i, j, 1, 1, '#c8453b')
+      rect(c + 3, 8, 1, 1, '#44566e')
+    } else {
+      rect(c - 4, 5, 1, 4, '#3a3634')
+      rect(c - 4, 5, 3, 1, '#3a3634')
+      rect(c - 2, 6, 2, 3, '#f3dca0')
+      rect(c - 2, 5, 2, 1, '#3a3634')
+      if (panelTop > 9) {
+        rect(c + 1, panelTop - 3, 6, 1, '#6a4a2e')
+        rect(c + 1, panelTop - 6, 1, 3, '#8e3f33')
+        rect(c + 2, panelTop - 5, 1, 2, '#44566e')
+        rect(c + 3, panelTop - 6, 2, 3, '#c9a04e')
+        rect(c + 5, panelTop - 5, 1, 2, '#5b7352')
+      }
+    }
   },
+}
+
+/** 灯塔剖开后塔墙里面挂的陈设，和灯塔房间的北墙一样（a～b 是空出来的一段墙） */
+export function lighthouseDecor(
+  rect: Rect,
+  a: number,
+  b: number,
+  panelTop: number,
+  height: number,
+  seed: number,
+  pal: InteriorPalette
+) {
+  DECOR.lighthouse!(rect, a, b, panelTop, height, seed, pal)
 }
 
 /** 剧院：北墙正中的红幕和金色顶帘 */
@@ -492,13 +550,31 @@ export function keepInside(
   halfY: number
 ): [number, number] {
   if (x < house.x || x > house.x + house.w || y < house.y || y > house.y + house.h) return [x, y]
+  // 剖开的灯塔：台子边那圈矮石边砌在占地往里三格的地方
+  const wall = house.tower ? 5 * PIXEL : T
   const clamp = (at: number, start: number, span: number, half: number) => {
-    const lo = start + T + half,
-      hi = start + span - T - half
+    const lo = start + wall + half,
+      hi = start + span - wall - half
     return lo > hi ? start + span / 2 : Math.min(hi, Math.max(lo, at))
   }
   x = clamp(x, house.x, house.w, halfX)
   y = clamp(y, house.y, house.h, halfY)
+  if (house.tower) {
+    // 人站在塔里或塔外的台面上，不站进塔墙：离哪边近就挪到哪边
+    const cx = house.x + house.w / 2,
+      cy = house.y + house.h / 2
+    const dx = x - cx,
+      dy = y - cy,
+      r = Math.hypot(dx, dy) || 1
+    const half = Math.max(halfX, halfY)
+    const lo = Math.max(0, house.tower.foot - 3 * PIXEL - half),
+      hi = house.tower.foot + half
+    if (r > lo && r < hi) {
+      const to = r - lo < hi - r ? lo : hi
+      return [cx + (dx / r) * to, cy + (dy / r) * to]
+    }
+    return [x, y]
+  }
   if (partition) {
     const alongX = partition.alongX
     const wall = (alongX ? house.y + house.h / 2 : house.x + house.w / 2) + partition.at

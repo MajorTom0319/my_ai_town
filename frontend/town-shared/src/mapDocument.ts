@@ -59,8 +59,10 @@ export interface MapDocument {
   spatial?: Spatial
   assets?: AssetManifest
   views?: { available: string[]; default: string }
-  /** 生成的地图带着建镇参数；environment.preset 决定 2D 地图的风格 */
-  generation?: { spec?: { environment?: { preset?: string } } }
+  /** 生成的地图带着建镇参数；environment.preset 决定 2D 地图的风格，settlement 为 wild 时路边不立路灯 */
+  generation?: {
+    spec?: { environment?: { preset?: string }; settlement?: 'town' | 'wild' | 'ring' }
+  }
 
   schema_version: number
   id: string
@@ -80,6 +82,8 @@ export interface TownCreation {
   description: string
   worldview: string
   residents: string[]
+  /** 从预制小镇开的一局：预制小镇的编号（prefabs/），进镇时出开局设置 */
+  prefab?: string
 }
 
 export interface MapEntry {

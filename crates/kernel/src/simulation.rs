@@ -40,6 +40,7 @@ impl World {
                 )
                 .min(physiology::next_boundary(&self.actors, &rates))
                 .min(self.happenings_boundary())
+                .min(self.game_mode_boundary())
                 .min(self.walk_boundary());
             let completed = self.advance_activities(&ids, t0, step);
             self.minutes = t0 + step;
@@ -54,6 +55,7 @@ impl World {
             // 带路人走完这一段后，跟随的人沿他的足迹跟上。
             self.advance_walks(step);
             self.advance_weather();
+            self.advance_game_mode();
             for id in completed {
                 // 第一名参与者完成会同时释放双方；第二名不能再结算已释放的空等。
                 if self.actors[&id].current.remaining(self.minutes).is_some() {
@@ -62,6 +64,7 @@ impl World {
             }
             self.fire_happenings();
             self.notice_bodies();
+            self.notice_losses();
             self.day_boundary(t0, &ids);
             self.expire_interactions();
             self.withdraw_departed_offers();
@@ -247,6 +250,20 @@ impl World {
         });
         let was_goto = binding
             .is_some_and(|b| BuiltinVerb::parse(&b.draft.intent.verb) == Some(BuiltinVerb::Goto));
+        let force =
+            binding.and_then(|b| crate::force::of_draft(&b.draft).map(|k| (k, b.draft.clone())));
+        if let Some((kind, draft)) = force {
+            return self.finish_force(id, &draft, kind);
+        }
+        let builtin = binding.and_then(|b| {
+            BuiltinVerb::parse(&b.draft.intent.verb)
+                .map(|verb| (verb, b.draft.clone(), b.action_id.clone()))
+        });
+        match builtin {
+            Some((BuiltinVerb::Search, ..)) => return Ok(self.finish_search(id)),
+            Some((BuiltinVerb::Hide, draft, key)) => return self.finish_hide(id, &draft, &key),
+            _ => {}
+        }
         if let Some((op, key)) = inventory {
             let changes = self.finish_inventory(id, &op, &key)?;
             for text in &changes {

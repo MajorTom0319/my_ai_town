@@ -16,7 +16,7 @@ import { showValidation, renderPropDetail } from './detail'
 import { createPropCard } from './card'
 import { readPackage, renderLibrary } from './libraryView'
 import { createPropsPageState, type PropsDeps, type PropsView } from './pageState'
-import { PURPOSES, renderWorld } from './worldView'
+import { PURPOSES, definitionOf, renderWorld } from './worldView'
 import { createPlacing } from './placing'
 
 const worldHint = '点选一件物品，看它能做什么、现在能不能用。'
@@ -35,7 +35,7 @@ function propsSkeleton(
   root.hidden = true
   // 面板可使用整页页头或独立窗口页头
   const toolbar = el('header', '', game ? 'props-toolbar' : 'page-topbar')
-  const heading = el('h1', '场景物品')
+  const heading = el('h1', '道具')
   heading.id = 'props-title'
   const status = el('p', '正在读取道具库…', 'prop-status')
   status.setAttribute('aria-live', 'polite')
@@ -141,7 +141,9 @@ class PropsPage implements PropsView {
   private cardPoll: number | null = null
   /** 地点下拉框上次按哪份地点表建的 */
   private locationSignature = ''
-  private readonly announce: ReturnType<typeof announcer>
+  private readonly say: ReturnType<typeof announcer>
+  /** 顶上那行正说着 report 的结果：目录刷新不擦掉它 */
+  private reported = false
   readonly placing: ReturnType<typeof createPlacing> | null
   readonly localeName = (id: string) =>
     this.state.catalog?.locations.find((l) => l.id === id)?.name ?? id
@@ -167,7 +169,7 @@ class PropsPage implements PropsView {
       2000,
       deps.game
     )
-    this.announce = announcer(this.page.status)
+    this.say = announcer(this.page.status)
     this.placing = deps.map
       ? createPlacing({
           map: deps.map,
@@ -175,6 +177,8 @@ class PropsPage implements PropsView {
           localeName: this.localeName,
           refresh: () => deps.send({ type: 'get_props' }),
           command: (kind, build, done) => this.sendWorldCommand(kind, build, done),
+          ask: (build) => this.ask(build),
+          openLibrary: () => this.openLibrary(),
         })
       : null
     this.bindEvents()
@@ -211,6 +215,17 @@ class PropsPage implements PropsView {
     this.lifecycle.close()
   }
 
+  /** 顶上那行提示；bad 时标成错误 */
+  private announce(text: string, bad = false) {
+    this.reported = false
+    this.say(text, bad)
+  }
+
+  report(text: string) {
+    this.announce(text)
+    this.reported = true
+  }
+
   /** 地图上点了一件道具：弹出对象卡片，随服务端目录更新 */
   openCard(id: string) {
     this.state.selected = id
@@ -240,13 +255,15 @@ class PropsPage implements PropsView {
       this.cardSignature = text
       return
     }
-    const definition = catalog?.definitions.find((d) => `${d.id}@${d.version}` === p.definition)
+    const definition = definitionOf(catalog, p)
     const signature = JSON.stringify([p, definition?.description, connected])
     if (signature === this.cardSignature) return
     this.cardSignature = signature
-    const all = button('全部场景物品', () => {
+    // 镇上其他东西在道具浮窗里看：镜头飞到这件，浮窗列出镇上有什么；地图不支持时开整页
+    const all = button('镇上的道具', () => {
       this.closeCard()
-      this.open(p.id)
+      if (this.placing) this.placing.browse(p.id)
+      else this.open(p.id)
     })
     const buttons = [all]
     if (p.readable) {
@@ -275,10 +292,18 @@ class PropsPage implements PropsView {
   }
 
   /** 打开道具页；给了实例编号就清掉筛选，在当前地图里选中它 */
+  /** 整页的道具库：改道具、导出道具包、导入（道具浮窗底部进） */
+  openLibrary() {
+    this.page.mode.value = 'library'
+    this.open()
+  }
+
   open(id?: string) {
     const { page } = this
     this.closeCard()
     this.placing?.exit()
+    // 上回删除的结果到这次打开已经过时了
+    if (this.reported) this.announce('')
     if (id) {
       page.mode.value = 'world'
       page.search.value = ''
@@ -355,6 +380,44 @@ class PropsPage implements PropsView {
     return true
   }
 
+  /** 只读的问题（摆道具的格子、试放）：不进待回执表、不在道具页报结果，回包直接交给摆道具。
+   *  记着问的是什么：还没换新的小镇进程不认识这两条命令，回的是错误，按「没有格子」「放不下」交回去 */
+  private readonly asked = new Map<string, ClientMsg['type']>()
+  private ask(build: (world_id: string, request_id: string) => ClientMsg) {
+    const { catalog, connected } = this.state
+    if (!catalog || !connected) return null
+    const request_id = newId()
+    const msg = build(catalog.world_id, request_id)
+    this.asked.set(request_id, msg.type)
+    this.deps.send(msg)
+    return request_id
+  }
+
+  /** 摆道具问的问题回来了；出错时换成它自己的回包，不进事件栏 */
+  private answered(msg: ServerMsg) {
+    if (msg.type === 'placement_grid' || msg.type === 'placement_preview') {
+      this.asked.delete(msg.request_id)
+      this.placing?.answer(msg)
+      return true
+    }
+    if (msg.type !== 'error' || msg.request_id === undefined) return false
+    const kind = this.asked.get(msg.request_id)
+    if (!kind) return false
+    this.asked.delete(msg.request_id)
+    const { request_id } = msg
+    if (kind === 'get_placement_grid')
+      this.placing?.answer({ type: 'placement_grid', request_id, grids: [] })
+    else
+      this.placing?.answer({
+        type: 'placement_preview',
+        request_id,
+        ok: false,
+        message: msg.message,
+        spot: null,
+      })
+    return true
+  }
+
   render() {
     const { page, state } = this
     const scroll = page.scroll.scrollTop
@@ -377,6 +440,7 @@ class PropsPage implements PropsView {
   }
 
   handleMsg(msg: ServerMsg) {
+    if (this.answered(msg)) return true
     if (msg.type === 'props') this.onCatalog(msg.catalog)
     else if (msg.type === 'prop_result') this.onResult(msg)
     // 命令没能执行（格式错误、命令过多）：按失败结束这次操作
@@ -402,6 +466,7 @@ class PropsPage implements PropsView {
       state.pending.clear()
       page.editor.hidden = true
       state.selected = ''
+      state.confirmDelete = ''
     }
     state.catalog = next
     if (this.cardId) this.renderCard()
@@ -436,8 +501,8 @@ class PropsPage implements PropsView {
       this.render()
       state.renderSignature = signature
     }
-    // 数量在列表顶部写了，这里只在有话要说时出声
-    if (!page.status.classList.contains('error'))
+    // 数量在列表顶部写了，这里只在有话要说时出声；错误和删除的结果留着
+    if (!this.reported && !page.status.classList.contains('error'))
       this.announce(next.persistent ? '' : '当前运行不保存到磁盘')
   }
 
@@ -493,6 +558,7 @@ class PropsPage implements PropsView {
     state.connected = false
     const unconfirmed = state.pending.size > 0
     state.pending.clear()
+    this.asked.clear()
     this.placing?.disconnected()
     this.announce(
       unconfirmed
@@ -512,6 +578,8 @@ class PropsPage implements PropsView {
     state.mapSignature = ''
     state.renderSignature = ''
     state.pending.clear()
+    state.confirmDelete = ''
+    this.asked.clear()
     this.page.editor.hidden = true
     this.placing?.reset()
     this.deps.send({ type: 'get_props' })

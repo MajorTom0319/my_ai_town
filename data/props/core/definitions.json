@@ -1975,7 +1975,7 @@
   },
   {
     "id": "core:island-driftwood",
-    "version": 1,
+    "version": 2,
     "name": "漂流木堆",
     "description": "海浪冲上岸的木头。每天天亮潮水会再冲上来一些。",
     "actions": [
@@ -1984,6 +1984,11 @@
         "label": "捡木头",
         "duration_minutes": 20,
         "completion": "activity",
+        "during": [
+          {
+            "kind": "labor"
+          }
+        ],
         "supply": {
           "initial": 4,
           "cost": 1,
@@ -2012,7 +2017,7 @@
   },
   {
     "id": "core:island-palms",
-    "version": 1,
+    "version": 2,
     "name": "棕榈树",
     "description": "几棵歪脖子棕榈树，叶子和椰子都有限。",
     "actions": [
@@ -2021,6 +2026,11 @@
         "label": "采棕榈叶",
         "duration_minutes": 15,
         "completion": "activity",
+        "during": [
+          {
+            "kind": "labor"
+          }
+        ],
         "supply": {
           "initial": 6,
           "cost": 1,
@@ -2708,6 +2718,441 @@
           }
         ],
         "recipient": true
+      }
+    ]
+  },
+  {
+    "id": "core:island-stone",
+    "version": 1,
+    "name": "石块",
+    "description": "拳头大的石块，砸人很疼，一下砸不死人。",
+    "portable": true,
+    "stack_limit": 3,
+    "actions": [
+      {
+        "id": "hit",
+        "label": "用石块砸",
+        "duration_minutes": 2,
+        "completion": "activity",
+        "recipient": true,
+        "on_complete": [
+          {
+            "kind": "harm",
+            "amount": 15,
+            "wound": "额头被石块砸破"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-club",
+    "version": 1,
+    "name": "木棍",
+    "description": "一根结实的硬木棍，挥起来能把人打得青紫。",
+    "portable": true,
+    "actions": [
+      {
+        "id": "hit",
+        "label": "用木棍打",
+        "duration_minutes": 2,
+        "completion": "activity",
+        "recipient": true,
+        "on_complete": [
+          {
+            "kind": "harm",
+            "amount": 15,
+            "wound": "身上被木棍打得青紫"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-harpoon",
+    "version": 1,
+    "name": "鱼叉",
+    "description": "渔民落下的铁头鱼叉，被塞在不起眼的角落，不仔细搜找不到。",
+    "portable": true,
+    "hidden": true,
+    "actions": [
+      {
+        "id": "stab",
+        "label": "用鱼叉刺",
+        "duration_minutes": 3,
+        "completion": "activity",
+        "recipient": true,
+        "on_complete": [
+          {
+            "kind": "harm",
+            "amount": 40,
+            "wound": "被鱼叉刺穿的伤口"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-herbs",
+    "version": 1,
+    "name": "草药",
+    "description": "一把能退烧的草药，嚼碎了敷上、煎水喝都行，只够用一次。",
+    "portable": true,
+    "actions": [
+      {
+        "id": "cure",
+        "label": "用草药治病",
+        "duration_minutes": 10,
+        "completion": "activity",
+        "consumes_item": true,
+        "recipient": true,
+        "on_complete": [
+          {
+            "kind": "cure_condition",
+            "condition": "illness"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-stone-hut",
+    "version": 1,
+    "name": "残墙石屋",
+    "description": "废墟里还剩半截墙的石屋，顶上搭着棕榈叶，挤得下一个人避雨、睡觉。",
+    "shelter": true,
+    "actions": [
+      {
+        "id": "hide",
+        "label": "在石屋里避雨",
+        "duration_minutes": 30,
+        "completion": "activity",
+        "rest": true,
+        "during": [
+          {
+            "kind": "restore_need",
+            "need": "energy",
+            "per_minute": 0.05,
+            "pause_decay": true
+          }
+        ]
+      },
+      {
+        "id": "sleep",
+        "label": "在石屋里睡觉",
+        "duration_minutes": 480,
+        "completion": "sleep",
+        "rest": true,
+        "during": [
+          {
+            "kind": "restore_need",
+            "need": "energy",
+            "per_minute": 0.15625,
+            "pause_decay": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-water-tube",
+    "version": 1,
+    "name": "竹筒水",
+    "description": "一节灌满淡水的竹筒，能带在身上，自己喝或者喂给身边的人。",
+    "portable": true,
+    "stack_limit": 3,
+    "actions": [
+      {
+        "id": "drink",
+        "label": "喝竹筒水",
+        "duration_minutes": 2,
+        "completion": "activity",
+        "consumes_item": true,
+        "recipient": true,
+        "on_complete": [
+          {
+            "kind": "restore",
+            "need": "water",
+            "amount": 35
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-bamboo",
+    "version": 1,
+    "name": "空竹筒堆",
+    "description": "一捆砍好的空竹筒，就着水源灌一筒带走。每天天亮能再找到几节。",
+    "actions": [
+      {
+        "id": "fill",
+        "label": "灌一筒水",
+        "duration_minutes": 3,
+        "completion": "activity",
+        "supply": {
+          "initial": 6,
+          "cost": 1,
+          "restock": {
+            "amount": 3,
+            "max": 6
+          }
+        },
+        "on_complete": [
+          {
+            "kind": "give_item",
+            "item": {
+              "id": "core:island-water-tube",
+              "version": 1,
+              "name": "竹筒水",
+              "description": "一节灌满淡水的竹筒，能带在身上，自己喝或者喂给身边的人。",
+              "portable": true,
+              "stack_limit": 3,
+              "actions": [
+                {
+                  "id": "drink",
+                  "label": "喝竹筒水",
+                  "duration_minutes": 2,
+                  "completion": "activity",
+                  "consumes_item": true,
+                  "recipient": true,
+                  "on_complete": [
+                    {
+                      "kind": "restore",
+                      "need": "water",
+                      "amount": 35
+                    }
+                  ]
+                }
+              ]
+            },
+            "count": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-herb-bush",
+    "version": 1,
+    "name": "草药丛",
+    "description": "石缝里长着的一丛退烧草药，一次只够采一把。采光了，第二天天亮又能长出一把。",
+    "actions": [
+      {
+        "id": "pick",
+        "label": "采草药",
+        "duration_minutes": 10,
+        "completion": "activity",
+        "supply": {
+          "initial": 1,
+          "cost": 1,
+          "restock": {
+            "amount": 1,
+            "max": 1
+          }
+        },
+        "on_complete": [
+          {
+            "kind": "give_item",
+            "item": {
+              "id": "core:island-herbs",
+              "version": 1,
+              "name": "草药",
+              "description": "一把能退烧的草药，嚼碎了敷上、煎水喝都行，只够用一次。",
+              "portable": true,
+              "actions": [
+                {
+                  "id": "cure",
+                  "label": "用草药治病",
+                  "duration_minutes": 10,
+                  "completion": "activity",
+                  "consumes_item": true,
+                  "recipient": true,
+                  "on_complete": [
+                    {
+                      "kind": "cure_condition",
+                      "condition": "illness"
+                    }
+                  ]
+                }
+              ]
+            },
+            "count": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-ration-sack",
+    "version": 1,
+    "name": "干粮袋",
+    "description": "一大袋压得结实的干粮，可以就地吃；每天天亮还能领走几份带在身上，自己吃或者喂给身边的人。",
+    "actions": [
+      {
+        "id": "eat",
+        "label": "吃干粮",
+        "duration_minutes": 10,
+        "completion": "activity",
+        "recipient": true,
+        "supply": {
+          "initial": 100,
+          "cost": 1
+        },
+        "on_complete": [
+          {
+            "kind": "restore",
+            "need": "fullness",
+            "amount": 25.0
+          }
+        ]
+      },
+      {
+        "id": "take",
+        "label": "领一份干粮",
+        "duration_minutes": 3,
+        "completion": "activity",
+        "supply": {
+          "initial": 8,
+          "cost": 1,
+          "restock": {
+            "amount": 8,
+            "max": 8
+          }
+        },
+        "on_complete": [
+          {
+            "kind": "give_item",
+            "item": {
+              "id": "core:island-ration",
+              "version": 1,
+              "name": "一份干粮",
+              "description": "从干粮袋里领的一份干粮，能带在身上，自己吃或者喂给身边的人。",
+              "portable": true,
+              "stack_limit": 3,
+              "actions": [
+                {
+                  "id": "eat",
+                  "label": "吃一份干粮",
+                  "duration_minutes": 5,
+                  "completion": "activity",
+                  "consumes_item": true,
+                  "recipient": true,
+                  "on_complete": [
+                    {
+                      "kind": "restore",
+                      "need": "fullness",
+                      "amount": 25.0
+                    }
+                  ]
+                }
+              ]
+            },
+            "count": 1
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:island-ration",
+    "version": 1,
+    "name": "一份干粮",
+    "description": "从干粮袋里领的一份干粮，能带在身上，自己吃或者喂给身边的人。",
+    "portable": true,
+    "stack_limit": 3,
+    "actions": [
+      {
+        "id": "eat",
+        "label": "吃一份干粮",
+        "duration_minutes": 5,
+        "completion": "activity",
+        "consumes_item": true,
+        "recipient": true,
+        "on_complete": [
+          {
+            "kind": "restore",
+            "need": "fullness",
+            "amount": 25.0
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "core:book-12",
+    "version": 1,
+    "name": "末日之战纪实",
+    "description": "完成阅读后可访问正文；记忆由阅读者自主决定。",
+    "readable": {
+      "work_id": "k-doomsday-battle",
+      "version": 1,
+      "kind": "book",
+      "title": "末日之战纪实",
+      "author": "太空军战史编写组",
+      "text": "危机纪元二百零五年，人类两千艘恒星级战舰在柯伊伯带外列成方阵，迎接三体世界派来的一个探测器。它只有几米长，形状像一滴水银，表面光滑得能映出整支舰队，人们叫它「水滴」。舰队打算把它捕获回去研究，很多人在舰上举杯，以为战争就要以人类的胜利结束。几分钟后，水滴开始加速。它在方阵里穿行，一艘接一艘撞穿战舰，炮火打在它身上不留一点痕迹。不到半个小时，两千艘战舰只剩几艘逃了出去。后来人们才知道，水滴用强相互作用力材料造成，比人类知道的一切东西都硬。末日之战以后，挡在三体舰队前面的不再是战舰，而是威慑：只要执剑人的手还放在开关上，水滴就不敢再来。",
+      "origin": {
+        "kind": "builtin"
+      }
+    },
+    "actions": [
+      {
+        "id": "read",
+        "label": "阅读",
+        "duration_minutes": 30,
+        "completion": "read_book"
+      }
+    ]
+  },
+  {
+    "id": "core:book-13",
+    "version": 1,
+    "name": "威慑纪元宪章",
+    "description": "完成阅读后可访问正文；记忆由阅读者自主决定。",
+    "readable": {
+      "work_id": "k-deterrence-charter",
+      "version": 1,
+      "kind": "book",
+      "title": "威慑纪元宪章",
+      "author": "联合国",
+      "text": "第一条　执剑人掌握引力波宇宙广播的开关。三体世界一旦进攻地球，执剑人应当按下开关，把三体世界的坐标广播给全宇宙。第二条　执剑人由公众选举产生，在联合国大厅地下的控制室值守，开关时刻不离执剑人身边。第三条　交接时，前任执剑人当面交出开关；新任执剑人从接过开关的那一刻起，独自承担全部责任。第四条　按与不按，由执剑人一人决定，任何人不得干预。第五条　威慑的力量不在开关本身，而在三体世界相信执剑人一定会按下它。（页边有人用铅笔写了一行小字：要是他们不信呢？）",
+      "origin": {
+        "kind": "builtin"
+      }
+    },
+    "actions": [
+      {
+        "id": "read",
+        "label": "阅读",
+        "duration_minutes": 30,
+        "completion": "read_book"
+      }
+    ]
+  },
+  {
+    "id": "core:tea-table",
+    "version": 1,
+    "name": "茶席",
+    "description": "矮茶几上摆着一把青瓷茶壶和几只小杯。坐下来喝一杯，也可以给同在这里的客人倒一杯。",
+    "actions": [
+      {
+        "id": "tea",
+        "label": "喝茶",
+        "duration_minutes": 20,
+        "completion": "activity",
+        "recipient": true,
+        "on_complete": [
+          {
+            "kind": "restore",
+            "need": "water",
+            "amount": 20
+          },
+          {
+            "kind": "restore",
+            "need": "energy",
+            "amount": 5
+          }
+        ]
       }
     ]
   }

@@ -73,18 +73,30 @@ fn digest(parts: &[&str]) -> u64 {
 }
 
 /// 观察里变化慢的字段：和本段会话上次发出的相同时省略。
-pub(crate) const SLOW_OBSERVATION_FIELDS: [&str; 5] = [
+pub(crate) const SLOW_OBSERVATION_FIELDS: [&str; 8] = [
     "visible_props",
     "environment",
     "people_here",
     "inventory",
     "body",
+    "known_places",
+    "exits",
+    "spots",
 ];
 
 /// 字段连同它的来源引用一起计摘要，截断方式变了也算变化。
 pub(crate) fn observation_field_digest(observation: &Value, key: &str) -> u64 {
     let source = observation[format!("{key}_source")].to_string();
     digest(&[&observation[key].to_string(), &source])
+}
+
+/// 到这个事件为止，本人有没有读完过东西；整理记忆时据此决定给不给 read_content。
+fn has_read(world: &World, actor: &str, through: u64) -> bool {
+    world
+        .contents()
+        .readings
+        .get(actor)
+        .is_some_and(|read| read.range(..=through).next().is_some())
 }
 
 fn unix_now() -> u64 {
@@ -373,7 +385,13 @@ impl ResidentRuntime {
         }
         let round = self.plan_round(world, s)?;
         let kind = round.kind();
-        let tools = tools::definitions(kind);
+        let tools = match &round {
+            PlannedRound::Reflection(batch) => {
+                tools::reflection_definitions(has_read(world, &s.actor_id, batch.through))
+            }
+            PlannedRound::Life { .. } => tools::life_definitions(world, &s.actor_id),
+            PlannedRound::Chat => tools::definitions(kind),
+        };
         let tools_json = serde_json::to_string(&tools).expect("工具定义可序列化");
         let draft = match &round {
             PlannedRound::Reflection(batch) => self.reflection_draft(world, s, batch, &tools_json),

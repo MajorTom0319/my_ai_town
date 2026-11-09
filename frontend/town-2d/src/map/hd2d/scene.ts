@@ -12,11 +12,14 @@ import { pier, PIER_DECK, pierLampCanvas } from './pier'
 import { fbm, hash, rng } from '../pixel/noise'
 import { Motes } from './motes'
 import { Villagers, type LiveMotion, type VillagerPlacement } from './villagers'
+import type { Badge } from './villagerSigns'
 import { villagerLight } from './villagerLight'
 import { VILLAGER_HALF, VILLAGER_HEIGHT, VILLAGER_SCALE } from './villagerSprite'
 import { Weather3D } from './weather'
+import { gameModeLooks, type GameModeLook } from './gameModes'
 import { DOORS } from '../buildings'
 import type { WeatherKind } from 'town-shared/weather/types'
+import type { GameModeView } from 'town-shared/protocol'
 import {
   DEFAULT_PITCH,
   PITCH_MAX,
@@ -24,6 +27,7 @@ import {
   WALL_TEXEL,
   houseOf,
   houseTop,
+  riseOf,
   tiltOf,
   type House,
   type Tilt,
@@ -67,7 +71,8 @@ import { ChimneySmoke } from './smoke'
 import { interior, interiorTop, keepInside } from './interior'
 import type { Partition } from './partition'
 import { PROP_BASE, PropStandees, type PropPlacement } from './props'
-import { colonnadeFront, lighthouseTower, vaultRoof } from './structures'
+import { colonnadeFront, vaultRoof } from './structures'
+import { lighthouse } from './lighthouse'
 import { dissolvable } from './dissolve'
 import { onStandee, stand, standee, texture } from './standee'
 import type { MapTheme } from '../themes/types'
@@ -233,6 +238,21 @@ function waterGridOf(ground: Ground, outerWater: boolean) {
   return { cells, gw, gh, outerWater }
 }
 
+/** 按地点编号找它的地标落在哪儿：和 landmarkSprites 一样取地点格子的外框中心（场景的 x、z 就是地图坐标） */
+function landmarkSpot(atlas: Atlas) {
+  const regions = new Map(atlas.regions.map((r) => [r.id, r]))
+  return (locale: string) => {
+    const r = regions.get(locale)
+    if (!r?.cells.length) return null
+    const xs = r.cells.map(([x]) => x * r.cell_size),
+      ys = r.cells.map(([, y]) => y * r.cell_size)
+    return {
+      x: (Math.min(...xs) + Math.max(...xs) + r.cell_size) / 2,
+      z: (Math.min(...ys) + Math.max(...ys) + r.cell_size) / 2,
+    }
+  }
+}
+
 /** 一栋房子的窗和灯在入夜后什么时候亮（亮灯程度的门槛），按房子编号错开 */
 const houseLightsOn = (house: House) => 0.12 + hash(house.seed, 3, 11) * 0.62
 
@@ -312,6 +332,8 @@ export class HdScene {
   private readonly fauna: Fauna
   /** 冒烟的烟囱口（世界坐标）：夜里飘火星 */
   private readonly chimneyMouths: [number, number, number][] = []
+  /** 灯塔：地图坐标和灯室的高度，海鸥绕着塔顶飞 */
+  private readonly beacons: [number, number, number][] = []
   /** 地面哪些像素是水：脚印落在水里是涟漪 */
   private readonly groundWet: { wet: Uint8Array; width: number; height: number }
   /** GPU 计时（见 perf.ts）：开发版浮层、「自动」画质跑不动时降档 */
@@ -328,8 +350,9 @@ export class HdScene {
   onNotice?: (text: string) => void
   /** 夜里亮灯的程度：日落前后从 0 升到 1，各盏灯按自己的门槛亮起 */
   private lit = 0
-  /** 灯塔转动的光束（冰雪风格） */
+  /** 灯塔转动的光束；光束扫到正对镜头时灯室那一闪 */
   private readonly beams: THREE.Mesh[] = []
+  private readonly flares: { beam: THREE.Object3D; sprite: THREE.Sprite }[] = []
   private readonly smoke = new ChimneySmoke()
   /** 逐帧动画的地标（喷泉）：图集横排，按时间挪贴图的横向偏移 */
   private readonly flipbooks: { maps: THREE.Texture[]; frames: number; fps: number }[] = []
@@ -377,9 +400,10 @@ export class HdScene {
   /** 场景的雾，颜色由 applyLight 跟着天色改 */
   private readonly fog: THREE.FogExp2
   private readonly motes: Motes
-  private readonly villagers = new Villagers(this.scene, this.tilt, (m) =>
+  private readonly villagers = new Villagers(this.scene, this.tilt, (m) => {
     this.lightmap.shade(m, 'standee')
-  )
+    for (const look of this.looks) look.shadeStanding(m, 'villager')
+  })
   private readonly swayAt = (x: number, z: number) => this.weather.swayAt(x, z)
   /** 灯笼的光：和路灯同色，暗一些 */
   private get lanternColor() {
@@ -394,11 +418,18 @@ export class HdScene {
     this.scene,
     this.tilt,
     () => this.request(),
-    (m) => this.lightmap.shade(m, 'standee')
+    (m) => {
+      this.lightmap.shade(m, 'standee')
+      for (const look of this.looks) look.shadeStanding(m, 'thing')
+    }
   )
   private lastTick = performance.now()
 
   private readonly theme: MapTheme
+  /** 玩法的画面（gameModes/）：地面、海面、立着的东西和村民的着色先装好，名册来了交给它们 */
+  private readonly looks: GameModeLook[]
+  /** 玩法自己的界面盖在地图上的那一层 */
+  private readonly modeLayer = document.createElement('div')
 
   /** ground 是这张地图算好的地面（pixel/terrain.ts 的 groundOf），场景只读它 */
   constructor(
@@ -409,7 +440,12 @@ export class HdScene {
   ) {
     const { seed, decor, theme } = ground
     this.theme = theme
+    this.looks = gameModeLooks(theme)
     this.renderer = createRenderer(container, svg)
+    this.modeLayer.className = 'mode-layer'
+    this.modeLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden'
+    container.append(this.modeLayer)
+    for (const look of this.looks) look.mount?.(this.modeLayer)
     this.scene.add(this.flat)
     this.center = [atlas.canvas.width / 2, atlas.canvas.height / 2]
 
@@ -443,6 +479,7 @@ export class HdScene {
     this.addPiers(ground, glowMap, seed)
     // 地标立牌和散落物先占地，剩下的空地再撒树、放微粒
     const open = this.placeStandees(atlas, ground, seed)
+    for (const look of this.looks) look.addToScene?.(this.scene, landmarkSpot(atlas))
     const clear = { width: ground.width, height: ground.height, open }
     this.addTrees(decor, clear, seed)
     this.addLamps(atlas, ground.wet, ground.width, glowMap)
@@ -459,6 +496,7 @@ export class HdScene {
     this.grass = new Grass(tuftsOf(decor, clear, seed, grassDensity), theme, this.tilt)
     Object.assign(this.grass.uniforms, this.weather.windUniforms, this.trail.uniforms)
     this.lightmap.shade(this.grass.surface, 'standee')
+    for (const look of this.looks) look.shadeStanding(this.grass.surface, 'thing')
     this.grass.group.traverse((o) => o.layers.set(REFLECTION_SKIP))
     this.scene.add(this.grass.group)
     this.upright.push((t) => this.grass.setTilt(t))
@@ -469,6 +507,7 @@ export class HdScene {
         flowers: decor.vegetation.filter((v) => v.kind === 'flowers').map((v) => [v.x, v.y]),
         shallows: theme.outer === 'sea' ? shallowsOf(ground) : [],
         chimneys: this.chimneyMouths,
+        towers: this.beacons,
         center: this.center,
       },
       theme,
@@ -538,7 +577,7 @@ export class HdScene {
         .map((p) => roomPoint(s.unfold, p.x, p.y))
       const house = this.houses.find((h) => h.id === s.id)!
       const on = houseLightsOn(house)
-      this.addHouse(house, s.door_outside, points, on)
+      this.addHouse(house, s.door_outside, points, on, glowMap)
       const lamp = new THREE.Color(this.theme.light.lamp)
       if (s.door_outside) {
         const [dx, dy] = s.door_outside
@@ -642,6 +681,7 @@ export class HdScene {
     if (bolt && !this.bolt) this.villagers.startle()
     this.bolt = bolt
     if (weather.light) this.applyLight(false)
+    for (const look of this.looks) if (look.step?.(t / 1000)) changed = true
     changed ||= weather.changed || this.ambient
     this.ambient = false
     if (!this.reduceMotion.matches) {
@@ -651,6 +691,7 @@ export class HdScene {
       this.motes.step(t)
       this.horizon.step(t / 1000)
       for (const b of this.beams) b.rotation.y -= dt * 0.9
+      this.flare()
       this.smoke.step(t / 1000)
       for (const b of this.flipbooks)
         for (const m of b.maps) m.offset.x = (Math.floor((t / 1000) * b.fps) % b.frames) / b.frames
@@ -721,6 +762,11 @@ export class HdScene {
     return interiorTop(house, this.tilt)
   }
 
+  /** 离地 height 高的一点在屏幕上高出它脚下多少，折成地图纵深 */
+  rise(height: number) {
+    return riseOf(height, this.tilt)
+  }
+
   setPitch(degrees: number) {
     this.setAngles(degrees, this.yawDegrees)
   }
@@ -729,20 +775,23 @@ export class HdScene {
     this.setAngles(this.pitchDegrees, degrees)
   }
 
-  private setAngles(pitch: number, yaw: number) {
+  /** 俯角和转角一起设；exact 时俯角不取整、也不记到本机（重演拍素材时逐帧连续地转） */
+  setAngles(pitch: number, yaw: number, exact = false) {
     if (!Number.isFinite(pitch) || !Number.isFinite(yaw)) return
-    const next = Math.round(Math.min(PITCH_MAX, Math.max(PITCH_MIN, pitch)))
+    const clamped = Math.min(PITCH_MAX, Math.max(PITCH_MIN, pitch))
+    const next = exact ? clamped : Math.round(clamped)
     const nextYaw = normalizeYaw(yaw)
     if (next === this.pitchDegrees && nextYaw === this.yawDegrees) return
     this.pitchDegrees = next
     this.yawDegrees = nextYaw
     this.tilt = tiltOf(next, nextYaw)
-    try {
-      localStorage.setItem(PITCH_KEY, String(next))
-      localStorage.setItem(YAW_KEY, String(nextYaw))
-    } catch {
-      // 存不下就只在这次页面里生效
-    }
+    if (!exact)
+      try {
+        localStorage.setItem(PITCH_KEY, String(next))
+        localStorage.setItem(YAW_KEY, String(nextYaw))
+      } catch {
+        // 存不下就只在这次页面里生效
+      }
     this.applyTilt()
     this.onTilt?.()
   }
@@ -1086,7 +1135,7 @@ export class HdScene {
     ground.rotation.x = -Math.PI / 2
     ground.position.set(-MARGIN + w / 2, 0, -MARGIN + h / 2)
     ground.receiveShadow = true
-    const coast = coastTexture(terrain.depth, terrain.shore, terrain.calm, pw, ph)
+    const coast = coastTexture(terrain.depth, terrain.shore, terrain.calm, pw, ph, wet)
     const { material, time, sparkle, sunPath } = outerMaterial(
       coast,
       this.horizon.haze,
@@ -1099,6 +1148,10 @@ export class HdScene {
     if (this.theme.outer === 'sea') surfOnLand(landMaterial, coast, time, this.theme)
     this.lightmap.shade(landMaterial, 'ground')
     wetReflection(landMaterial, this.reflection.uniforms, 'ground')
+    for (const look of this.looks) {
+      look.shadeGround(landMaterial, 'land')
+      look.shadeGround(material, 'sea')
+    }
     this.landMaterial = landMaterial
     const sea = new THREE.Mesh(new THREE.PlaneGeometry(w * 6, h * 6), material)
     sea.rotation.x = -Math.PI / 2
@@ -1115,17 +1168,25 @@ export class HdScene {
     house: House,
     door: [number, number] | undefined,
     points: [number, number][],
-    on: number
+    on: number,
+    glowMap: THREE.Texture
   ) {
     const { x, y, w, h } = house
     const group = new THREE.Group()
     group.position.set(x + w / 2, 0, y + h / 2)
-    // 只有朝南的墙面向镜头；门在南墙上时画出来
-    const onSouth = door && Math.abs(door[1] - (y + h)) <= Math.min(Math.abs(door[1] - y), 40)
-    const top = this.addBody(group, house, onSouth ? (door![0] - x) / PIXEL : undefined, on)
-    this.addRoof(group, house, top, on)
-    this.addFeatures(group, house, onSouth ? door![0] - (x + w / 2) : undefined)
-    this.addChimney(group, house)
+    // 灯塔掀开后是剖开的灯塔，别的房子是矮墙围起来的房间（见 interior.ts）
+    let room: { group: THREE.Group; glowing: THREE.Material[]; partition?: Partition }
+    if (house.tower) room = this.addLighthouse(group, house, door, on, glowMap)
+    else {
+      const inside = interior(house, door, points)
+      room = { ...inside, glowing: [inside.glowing] }
+      // 只有朝南的墙面向镜头；门在南墙上时画出来
+      const onSouth = door && Math.abs(door[1] - (y + h)) <= Math.min(Math.abs(door[1] - y), 40)
+      const top = this.addBody(group, house, onSouth ? (door![0] - x) / PIXEL : undefined, on)
+      this.addRoof(group, house, top, on)
+      this.addFeatures(group, house, onSouth ? door![0] - (x + w / 2) : undefined)
+      this.addChimney(group, house)
+    }
     this.flat.add(group)
     this.houseGroups.set(house.id, group)
     // 外壳的材质都是这栋自己的（看不见的底面除外），共用一个溶解程度
@@ -1138,11 +1199,10 @@ export class HdScene {
     for (const m of materials)
       dissolvable(m, { uDissolve: amount, uDissolveCell: this.dissolveCell })
     this.reveals.set(house.id, { amount, open: false, from: 0, at: 0, moving: false })
-    const room = interior(house, door, points)
     this.flat.add(room.group)
     this.rooms.set(house.id, room.group)
     this.partitions.set(house.id, room.partition)
-    this.glowing.push({ material: room.glowing, on })
+    for (const material of room.glowing) this.glowing.push({ material, on })
   }
 
   /** 房子的墙：朝镜头的墙面贴画好的墙（夜里窗户发光），墙顶压深色；door 是门离墙左端的像素数。
@@ -1325,18 +1385,6 @@ export class HdScene {
       group.add(awning)
     }
     if (look.columns) group.add(colonnadeFront(house))
-    if (look.tower) {
-      // 灯塔立在离镇中心远的那一头，也就是朝海的一头
-      const tower = lighthouseTower(
-        house,
-        Math.sign(house.x + house.w / 2 - this.center[0]) || 1,
-        this.theme.lighthouse
-      )
-      group.add(tower.group)
-      // 灯塔天一暗就最先亮
-      this.glowing.push({ material: tower.lamp, on: 0.02 })
-      if (tower.beam) this.beams.push(tower.beam)
-    }
     if (look.flag) {
       const poleH = 16 * WALL_TEXEL
       const pole = new THREE.Mesh(
@@ -1353,6 +1401,71 @@ export class HdScene {
       flag.position.set(PIXEL / 2, wallH + ridge + poleH - 3 * WALL_TEXEL, 0)
       flag.castShadow = true
       group.add(pole, flag)
+    }
+  }
+
+  /** 灯塔整块占地是石台，塔立在正中（见 lighthouse.ts）。材质接上天气和光照图；灯室天一暗就最先亮，
+   *  塔窗、台阶灯跟这栋房子的灯一起亮。光晕往镜头那边挪一点，不被灯罩自己挡住；火盆的烟和火星从盆口冒。
+   *  返回掀开屋顶后的样子：剖开的灯塔 */
+  private addLighthouse(
+    group: THREE.Group,
+    house: House,
+    door: [number, number] | undefined,
+    on: number,
+    glowMap: THREE.Texture
+  ) {
+    const [cx, cz] = [group.position.x, group.position.z]
+    const built = lighthouse(house, door && [door[0] - cx, door[1] - cz], this.theme.lighthouse)
+    group.add(built.group)
+    for (const { material, snow, wet, sway } of built.weathered)
+      this.weather.shade(material, { snow, wet, sway })
+    for (const m of built.walls) this.lightmap.shade(m, 'wall')
+    for (const m of built.grounds) this.lightmap.shade(m, 'ground')
+    for (const g of built.glowing) this.glowing.push({ material: g.material, on: g.on ?? on })
+    this.selfLit.push(...built.burning)
+    const glow = (at: THREE.Vector3, size: number) => {
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: glowMap,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          transparent: true,
+          opacity: 0,
+        })
+      )
+      sprite.scale.set(size, size, 1)
+      const near = 6 * PIXEL
+      this.upright.push((t) =>
+        sprite.position.set(
+          at.x + near * t.yawSin * t.cos,
+          at.y + near * t.sin,
+          at.z + near * t.yawCos * t.cos
+        )
+      )
+      group.add(sprite)
+      return sprite
+    }
+    for (const g of built.glows) this.glows.push({ sprite: glow(g.at, g.size), on: g.on ?? on })
+    if (built.lamp) this.beacons.push([cx, cz, built.lamp.y])
+    if (built.beam) {
+      this.beams.push(built.beam as THREE.Mesh)
+      if (built.lamp) this.flares.push({ beam: built.beam, sprite: glow(built.lamp, 100 * PIXEL) })
+    }
+    for (const s of built.smoke) {
+      this.smoke.add(cx + s.x, s.y, cz + s.z, house.seed)
+      this.chimneyMouths.push([cx + s.x, s.y, cz + s.z])
+    }
+    built.room.group.position.copy(group.position)
+    return built.room
+  }
+
+  /** 光束扫到正对镜头时灯室一闪：两束光里离镜头水平方向最近的那束越正越亮，只在天黑后 */
+  private flare() {
+    const { yawSin, yawCos } = this.tilt
+    for (const { beam, sprite } of this.flares) {
+      const a = beam.rotation.y
+      const facing = Math.abs(Math.cos(a) * yawSin - Math.sin(a) * yawCos)
+      sprite.material.opacity = this.lit * 0.5 * facing ** 24
     }
   }
 
@@ -1408,6 +1521,7 @@ export class HdScene {
       }
       this.weather.shade(material, { snow: 1, wet: 0.4 })
       this.lightmap.shade(material, 'standee')
+      this.standing(mesh)
       const sx = Math.round(s.x / PIXEL) * PIXEL,
         sy = Math.round(s.y / PIXEL) * PIXEL
       this.upright.push((t) => stand(mesh, sx, sy, t))
@@ -1459,6 +1573,7 @@ export class HdScene {
         const mesh = standee(texture(canvas))
         this.weather.shade(mesh.material as THREE.MeshLambertMaterial, { snow: 1, wet: 0.4 })
         this.lightmap.shade(mesh.material as THREE.Material, 'standee')
+        this.standing(mesh)
         const sx = fromPx(x),
           sy = fromPx(y)
         this.upright.push((t) => stand(mesh, sx, sy, t))
@@ -1528,6 +1643,7 @@ export class HdScene {
       })
       this.lightmap.shade(mesh.material as THREE.Material, 'standee')
       if (mesh.customDepthMaterial) this.weather.swayShadow(mesh.customDepthMaterial)
+      this.standing(mesh)
       const sx = Math.round(x / PIXEL) * PIXEL,
         sy = Math.round(y / PIXEL) * PIXEL
       this.upright.push((t) => stand(mesh, sx, sy, t))
@@ -1624,6 +1740,7 @@ export class HdScene {
 
   /** 沿室外路段每隔一段立一盏路灯，灯光画进光照图。入夜时从镇中心往外一盏盏亮起 */
   private addLamps(atlas: Atlas, wet: Uint8Array, pw: number, glowMap: THREE.Texture) {
+    if (this.theme.lamp === 'none') return
     const rooms = this.houses
     const inRoom = (x: number, y: number, pad: number) =>
       rooms.some(
@@ -1676,6 +1793,27 @@ export class HdScene {
       this.contacts.push({ x: sx, y: sy, r: 2.5, strength: 0.3 })
     })
   }
+
+  /** 立在岛上的东西接上玩法的着色（潮水圈里按水深往下沉），投影跟着 */
+  private standing(mesh: THREE.Mesh) {
+    for (const look of this.looks) {
+      look.shadeStanding(mesh.material as THREE.Material, 'thing')
+      if (mesh.customDepthMaterial) look.shadeStanding(mesh.customDepthMaterial, 'thing')
+    }
+  }
+
+  /** 名册里开着的玩法此刻的状态（没开时 null）；metre 是每米的地图单位。状态没变时不重画 */
+  setGameMode(view: GameModeView | null, metre: number) {
+    const key = view ? `${metre}|${JSON.stringify(view)}` : ''
+    if (key === this.gameModeKey) return
+    this.gameModeKey = key
+    for (const look of this.looks) look.apply(view, metre)
+    const badges = new Map<string, Badge>()
+    for (const look of this.looks) look.badges?.().forEach((badge, id) => badges.set(id, badge))
+    this.villagers.setBadges(badges)
+    this.ambient = true
+  }
+  private gameModeKey = ''
 
   /** 世界时间与天气 */
   setClock(minutes: number, weather?: string) {
@@ -1738,6 +1876,10 @@ export class HdScene {
   /** 立牌比名册里的位置落后多少（地图单位）；不在场的人为 undefined */
   villagerLag(id: string) {
     return this.villagers.lag(id)
+  }
+  /** 立牌此刻的速度（地图单位 / 毫秒），见 Villagers.velocity */
+  villagerVelocity(id: string) {
+    return this.villagers.velocity(id)
   }
 
   /** 选中的人（金边、脚下光斑）、指着的人（白边） */
@@ -1882,6 +2024,7 @@ export class HdScene {
     for (const m of this.selfLit) m.emissiveIntensity = lerp(0.3, 0.55, Math.max(night, twilight))
     this.seaSparkle.value = lerp(0.3, 1, day) * (1 - cloud * 0.9)
     for (const b of this.beams) (b.material as THREE.MeshBasicMaterial).opacity = this.lit * 0.45
+    this.flare()
     this.horizon.setAurora(night * L.aurora)
     const dusk = Math.max(night, twilight * 0.8)
     this.bloom.strength = lerp(0.35, 0.5, dusk)
@@ -1937,7 +2080,8 @@ export class HdScene {
   /** 视野里有没有水：视野四角在地面上的外接框碰到有水的格子，或者伸出了地面画布（外面都是海） */
   private waterInView(target: THREE.Vector3, w: number, h: number) {
     const grid = this.waterGrid
-    if (!grid) return true
+    // 开着玩法时（潮水圈）圈外到处都可能是水
+    if (!grid || this.looks.some((look) => look.waterAnywhere)) return true
     const { yawSin, yawCos } = this.tilt
     const ex = (Math.abs(yawCos) * w + Math.abs(yawSin) * h) / 2,
       ez = (Math.abs(yawSin) * w + Math.abs(yawCos) * h) / 2
@@ -2210,6 +2354,7 @@ export class HdScene {
     this.weather.dispose()
     this.props.dispose()
     this.pitchControl?.remove()
+    this.modeLayer.remove()
     this.villagers.dispose()
     for (const o of this.observers) o.disconnect()
     this.scene.traverse((o) => {

@@ -42,8 +42,13 @@ fn action_result() -> ActionResult {
 
 fn agent_view() -> ResidentAgentView {
     ResidentAgentView {
-        state: AgentState::Thinking,
-        reason: "正在等待模型响应".into(),
+        state: AgentState::Waiting,
+        reason: "等小禾带木头回来 · 最迟 D1 08:10 再看".into(),
+        wait: Some(AgentWaitView {
+            reason: "等小禾带木头回来".into(),
+            until: 490.0,
+            event: Some(FactKind::Presence),
+        }),
         goals: vec![ResidentGoalView {
             id: "read".into(),
             title: "去图书馆读书".into(),
@@ -203,6 +208,7 @@ fn member(id: &str, at: At, activity: ActivityKind) -> RosterMember {
         plan: PlanView {
             current: "前往 花房咖啡馆".into(),
             upcoming: vec!["工作（30 分钟）".into()],
+            idle: false,
         },
         thought: Some(thought()),
         resident_agent: Some(agent_view()),
@@ -492,6 +498,8 @@ pub fn server_samples() -> Vec<ServerMsg> {
         },
         ServerMsg::WorldSettings {
             state: WorldSettingsView {
+                climate: Climate::Tropical,
+                game_mode: Some("tide".into()),
                 max_chars: 6000,
                 miracles: true,
                 mock: false,
@@ -500,7 +508,9 @@ pub fn server_samples() -> Vec<ServerMsg> {
                 physiology: PhysiologySwitches::default(),
                 provider: "p".into(),
                 ready: true,
+                recording: true,
                 revision: 1,
+                strangers: true,
                 world_id: "w1".into(),
                 worldview: "小镇".into(),
             },
@@ -524,6 +534,7 @@ pub fn server_samples() -> Vec<ServerMsg> {
                 persistent: true,
                 schema_version: 1,
                 spatial: None,
+                town_definitions: vec![],
                 world_id: "w1".into(),
             },
         },
@@ -533,8 +544,81 @@ pub fn server_samples() -> Vec<ServerMsg> {
             message: "无效".into(),
             preview: None,
         },
+        ServerMsg::PlacementGrid {
+            request_id: "r8".into(),
+            grids: vec![PlaceGrid {
+                by: "-0--".into(),
+                cells: ".pr.".into(),
+                columns: 2,
+                entrance: [43.3, 104.2],
+                entrance_clearance: 1.8,
+                locale: "loc_a".into(),
+                origin: [25.9, 103.7],
+                props: vec!["user:bench".into()],
+                room: 1,
+                room_capped: false,
+                rows: 2,
+                size: [0.65, 0.65],
+                step: 0.4,
+            }],
+        },
+        ServerMsg::PlacementPreview {
+            request_id: "r9".into(),
+            ok: true,
+            message: String::new(),
+            spot: Some(PropPosition {
+                id: "user:bench".into(),
+                locale: "loc_a".into(),
+                model: "generic".into(),
+                position: [35.0, 2.3, 110.0],
+                anchor: [35.0, 2.3, 110.8],
+                yaw: 0.,
+                footprint: [0.65, 0.65],
+            }),
+        },
         ServerMsg::Roster {
             environment: None,
+            game_mode: Some(GameModeView::Tide(TideView {
+                edge: TideCircle {
+                    center: [61.5, 40.25],
+                    radius: 38.5,
+                },
+                next: Some(TideCircle {
+                    center: [66.0, 42.0],
+                    radius: 24.0,
+                }),
+                phase: TidePhase::Rising,
+                ring: 2,
+                rings: 5,
+                players: vec![
+                    TidePlayer {
+                        id: "resident_ashu".into(),
+                        name: "阿树".into(),
+                        fell: None,
+                    },
+                    TidePlayer {
+                        id: "resident_xiaohe".into(),
+                        name: "小禾".into(),
+                        fell: Some("被阿树杀死（胸口一处刀伤）".into()),
+                    },
+                ],
+                news: vec![
+                    TideNews {
+                        at: 431.0,
+                        kind: TideNewsKind::Clash,
+                        text: "阿树持刀袭击小禾，健康 −100，小禾倒下了".into(),
+                    },
+                    TideNews {
+                        at: 432.0,
+                        kind: TideNewsKind::Flare,
+                        text: "信号弹从小禾身上到了阿树身上。".into(),
+                    },
+                ],
+                winner: None,
+                flare: Some(TideFlare::Held {
+                    id: "resident_ashu".into(),
+                }),
+            })),
             sim_minutes: 432.5,
             clock: "D1 07:12".into(),
             speed: 1.0,
@@ -631,6 +715,27 @@ pub fn server_samples() -> Vec<ServerMsg> {
         ServerMsg::Error {
             request_id: Some("op1".into()),
             message: "世界里没有这个人".into(),
+        },
+        ServerMsg::Recordings {
+            reels: vec![
+                ReelView {
+                    id: "20261107T023105Z".into(),
+                    started_at: 1_794_018_665_000,
+                    ended_at: None,
+                    from_clock: "D2 05:42".into(),
+                    to_clock: "D2 06:10".into(),
+                    bytes: 812_000,
+                },
+                ReelView {
+                    id: "20261105T074012Z".into(),
+                    started_at: 1_793_864_412_000,
+                    ended_at: Some(1_793_867_532_000),
+                    from_clock: "D1 09:10".into(),
+                    to_clock: "D1 21:58".into(),
+                    bytes: 6_300_000,
+                },
+            ],
+            live: Some("20261107T023105Z".into()),
         },
         ServerMsg::WorldReset {
             clock: "D1 07:00".into(),
@@ -1185,9 +1290,152 @@ fn prop_view(location: ItemLocation, actions: Vec<PropActionEntry>) -> PropView 
 }
 
 /// 补充两份完整运行状态；不枚举所有可选字段和参数变体。
+/// 名册里开着狼人杀：上帝视角的座位、发言、亮过的票和一夜的选择都给全。
+fn werewolf_roster() -> ServerMsg {
+    let line = |seat, text: &str, away, last| WerewolfLine {
+        seat,
+        text: text.into(),
+        at: 2470.0,
+        away,
+        last,
+        reason: Some("把疑点引到传话上".into()),
+    };
+    let mut roster = server_samples()
+        .into_iter()
+        .find(|m| matches!(m, ServerMsg::Roster { .. }))
+        .expect("有名册样本");
+    if let ServerMsg::Roster { game_mode, .. } = &mut roster {
+        *game_mode = Some(GameModeView::Werewolf(WerewolfView {
+            phase: WerewolfPhase::LastWords,
+            day: 2,
+            seats: vec![
+                WerewolfSeat {
+                    seat: 1,
+                    id: "resident_ashu".into(),
+                    name: "阿树".into(),
+                    role: WerewolfRole::Seer,
+                    out: None,
+                    out_day: None,
+                },
+                WerewolfSeat {
+                    seat: 2,
+                    id: "resident_finn".into(),
+                    name: "芬恩".into(),
+                    role: WerewolfRole::Wolf,
+                    out: Some(WerewolfOut::Exiled),
+                    out_day: Some(2),
+                },
+            ],
+            notice: "第 2 天 · 遗言".into(),
+            turn: Some(2),
+            until: Some(2480.0),
+            lines: vec![
+                line(1, "我验了 2 号，是狼。", false, false),
+                line(2, "我是好人。", true, true),
+            ],
+            ballots: vec![WerewolfBallot {
+                voter: 1,
+                target: Some(2),
+                reason: Some("他是我验出来的狼".into()),
+            }],
+            revealed: true,
+            night: Some(WerewolfNight {
+                night: 1,
+                wolf_lines: vec![line(2, "刀 1 号（选 1 号 阿树）", false, false)],
+                kill: Some(1),
+                guard: Some(1),
+                check: Some(WerewolfCheck {
+                    seat: 2,
+                    wolf: true,
+                }),
+                save: true,
+                poison: None,
+            }),
+            dawn: vec![],
+            winner: Some(WerewolfSide::Good),
+        }));
+    }
+    roster
+}
+
+/// 名册里开着执剑人之夜：说过的话、亮过的票、执剑人的决定和结局都给全。
+fn swordholder_roster() -> ServerMsg {
+    let mut roster = server_samples()
+        .into_iter()
+        .find(|m| matches!(m, ServerMsg::Roster { .. }))
+        .expect("有名册样本");
+    let seat = |seat, id: &str, name: &str, role, gone| SwordholderSeat {
+        seat,
+        id: id.into(),
+        name: name.into(),
+        role,
+        gone,
+    };
+    if let ServerMsg::Roster { game_mode, .. } = &mut roster {
+        *game_mode = Some(GameModeView::Swordholder(SwordholderView {
+            phase: SwordholderPhase::Attack,
+            seats: vec![
+                seat(1, "resident_001", "罗辑", SwordholderRole::Holder, false),
+                seat(2, "resident_002", "程心", SwordholderRole::Candidate, false),
+                seat(3, "resident_003", "智子", SwordholderRole::Envoy, false),
+                seat(4, "resident_004", "老秦", SwordholderRole::Voter, true),
+            ],
+            notice: "水滴来袭".into(),
+            turn: Some(2),
+            until: Some(1155.0),
+            left: Some(6.8),
+            lines: vec![SwordholderLine {
+                seat: 2,
+                occasion: "演说".into(),
+                text: "我会守住这个开关。".into(),
+                at: 1032.0,
+                away: true,
+                reason: Some("先让大家安心".into()),
+            }],
+            ballots: vec![SwordholderBallot {
+                voter: 4,
+                target: Some(2),
+                reason: Some("她不会乱来".into()),
+            }],
+            revealed: true,
+            elected: Some(2),
+            appointed: true,
+            swordholder: 2,
+            decision: Some(SwordholderDecision {
+                seat: 2,
+                press: false,
+                at: 1150.0,
+                text: Some("不……".into()),
+                reason: Some("下不了手".into()),
+            }),
+            ending: Some(SwordholderEnding::Failed),
+            antenna: Some("obelisk_1".into()),
+        }));
+    }
+    roster
+}
+
 pub fn shape_samples() -> (Vec<ServerMsg>, Vec<ClientMsg>) {
     (
         vec![
+            werewolf_roster(),
+            swordholder_roster(),
+            // 玩法里说的一段话：日志正文照旧，另带发言人、座号、场合和原话
+            ServerMsg::Event {
+                sim_minutes: 2588.0,
+                clock: "D2 19:08".into(),
+                text: "[D2 19:08] 【狼人频道】2 号 芬恩：刀 1 号阿树，天亮前别露口风。（选 1 号 阿树）"
+                    .into(),
+                info: EventInfo::speech(
+                    "resident_finn",
+                    "芬恩",
+                    EventSpeech {
+                        occasion: "狼人频道".into(),
+                        seat: Some(2),
+                        text: "刀 1 号阿树，天亮前别露口风。（选 1 号 阿树）".into(),
+                    },
+                ),
+            },
             ServerMsg::AvatarState {
                 state: avatar_session(AvatarSight::Own(AvatarView::Present(Box::new(
                     avatar_state(),
@@ -1208,11 +1456,28 @@ pub fn shape_samples() -> (Vec<ServerMsg>, Vec<ClientMsg>) {
                     persistent: false,
                     schema_version: 1,
                     spatial: None,
+                    town_definitions: vec![definition()],
                     world_id: "w1".into(),
                 },
             },
         ],
         vec![
+            ClientMsg::SetGameMode {
+                request_id: "mode-2".into(),
+                world_id: "w1".into(),
+                game_mode: Some(GameModeChoice::Werewolf {
+                    seed: Some(7),
+                    day_hours: Some(6),
+                }),
+            },
+            ClientMsg::SetGameMode {
+                request_id: "mode-3".into(),
+                world_id: "w1".into(),
+                game_mode: Some(GameModeChoice::Swordholder {
+                    seed: Some(62),
+                    day_hours: Some(8),
+                }),
+            },
             avatar(AvatarCommand::Action {
                 revision: 3,
                 action: ActionDraft {
@@ -1261,6 +1526,13 @@ pub fn shape_samples() -> (Vec<ServerMsg>, Vec<ClientMsg>) {
                 },
                 message: "下午两点图书馆见？".into(),
                 to: None,
+            }),
+            interact(InteractionCommand::Offer {
+                partner_id: "resident_xiaohe".into(),
+                interaction: InteractionKind::Touch {
+                    gesture: Gesture::Hug,
+                },
+                message: "抱一下吧。".into(),
             }),
             avatar(AvatarCommand::Miracle {
                 revision: 3,
@@ -1358,6 +1630,32 @@ pub fn client_samples() -> Vec<ClientMsg> {
             world_id: "w1".into(),
             enabled: true,
         },
+        ClientMsg::SetClimate {
+            request_id: "r1".into(),
+            world_id: "w1".into(),
+            climate: Climate::Tropical,
+        },
+        ClientMsg::SetRecording {
+            request_id: "rec-1".into(),
+            world_id: "w1".into(),
+            enabled: false,
+        },
+        ClientMsg::GetRecordings,
+        ClientMsg::DeleteRecording {
+            request_id: "rec-2".into(),
+            world_id: "w1".into(),
+            reel: "20261105T074012Z".into(),
+        },
+        ClientMsg::SetStrangers {
+            request_id: "strangers-1".into(),
+            world_id: "w1".into(),
+            enabled: true,
+        },
+        ClientMsg::SetGameMode {
+            request_id: "mode-1".into(),
+            world_id: "w1".into(),
+            game_mode: Some(GameModeChoice::Tide { seed: Some(51) }),
+        },
         ClientMsg::SetPhysiology {
             request_id: "r1".into(),
             world_id: "w1".into(),
@@ -1388,6 +1686,10 @@ pub fn client_samples() -> Vec<ClientMsg> {
             request_id: "r5".into(),
             definition: definition(),
         },
+        ClientMsg::DeleteProp {
+            request_id: "r5-delete".into(),
+            id: "player:knife".into(),
+        },
         ClientMsg::RemoveProp {
             request_id: "r6".into(),
             world_id: "w1".into(),
@@ -1397,6 +1699,19 @@ pub fn client_samples() -> Vec<ClientMsg> {
             request_id: "r7".into(),
             world_id: "w1".into(),
             instance: json!({"id": "user:bench", "definition": "core:bench@1", "locale": "loc_a", "name": "工作台", "board": "board1"}),
+            near: Some(PlaceNear {
+                space: "town_outdoor".into(),
+                position: [12.5, 8.],
+            }),
+        },
+        ClientMsg::GetPlacementGrid {
+            request_id: "r8".into(),
+            world_id: "w1".into(),
+        },
+        ClientMsg::PreviewPlacement {
+            request_id: "r9".into(),
+            world_id: "w1".into(),
+            instance: json!({"id": "user:bench", "definition": "core:bench@1", "locale": "loc_a"}),
             near: Some(PlaceNear {
                 space: "town_outdoor".into(),
                 position: [12.5, 8.],
@@ -1455,6 +1770,17 @@ pub fn client_samples() -> Vec<ClientMsg> {
             resident_id: "resident_ashu".into(),
             appearance: appearance(),
         },
+        ClientMsg::SetResidentBody {
+            request_id: "body-1".into(),
+            world_id: "w1".into(),
+            resident_id: "resident_ashu".into(),
+            values: BodyValues {
+                fullness: Some(40.0),
+                energy: Some(60.0),
+                water: None,
+                health: Some(100.0),
+            },
+        },
         ClientMsg::GetUsage,
         ClientMsg::GetResidentLibrary {
             filter: LibraryFilter {
@@ -1501,6 +1827,32 @@ pub fn client_samples() -> Vec<ClientMsg> {
                 provider: "deepseek".into(),
                 model: "deepseek-chat".into(),
             }),
+            persona: None,
+        },
+        // 预制小镇的选手：借模板的长相，用这一局自己的人设
+        ClientMsg::JoinResident {
+            op_id: "op2".into(),
+            world_id: "w1".into(),
+            template_id: "builtin_stone".into(),
+            template_version: 1,
+            name: "秦烈".into(),
+            home: None,
+            model: None,
+            persona: Some(Box::new(TemplateFields {
+                name: "秦烈".into(),
+                age: "46".into(),
+                gender: "男".into(),
+                intro: "退伍兵，后来做保镖。".into(),
+                tags: vec!["狠".into(), "冷静".into()],
+                personality: "谁挡路就清掉谁。".into(),
+                speech: "话少，句句带命令。".into(),
+                background: "女儿下个月结婚，答应过要到场。".into(),
+                situation: "醒来在一座荒岛上，口袋里有一张纸条。".into(),
+                drives: "活着离开这座岛。".into(),
+                interests: String::new(),
+                occupation: "保镖".into(),
+                appearance: Appearance::default(),
+            })),
         },
         ClientMsg::GetResidentJoinResult {
             world_id: "w1".into(),

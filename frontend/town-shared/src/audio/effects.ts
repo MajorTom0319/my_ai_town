@@ -1,6 +1,6 @@
 import type { WeatherKind } from '../weather/types'
 import { EFFECT_ASSETS, rainAmbienceVolume, resolveFootstepSurface } from './catalog'
-import { resolveAudioScene } from './scene'
+import { ambienceAt } from './scene'
 import { readSwitch, saveSwitch } from './preference'
 
 const ENABLED_KEY = 'ai-town:effects-enabled'
@@ -32,9 +32,12 @@ export function createEffectsController(button: HTMLButtonElement) {
   let lastStep = -1
   const oneShots = new Set<HTMLAudioElement>()
 
+  /** 菜单里的开关：图标和「音效」不动，只改后面写开关的那一格；没有那一格时整个按钮写字 */
+  const state = button.querySelector<HTMLElement>('.toggle-state')
   const updateButton = () => {
     // 写明是音效、开着还是关着：只有符号时分不清音乐和音效，也看不出是状态还是按钮
-    button.textContent = enabled ? '♪ 音效：开' : '♪ 音效：关'
+    if (state) state.textContent = enabled ? '开' : '关'
+    else button.textContent = enabled ? '♪ 音效：开' : '♪ 音效：关'
     button.setAttribute('aria-label', enabled ? '音效：开' : '音效：关')
     button.setAttribute('aria-pressed', String(enabled))
     button.title = enabled
@@ -63,9 +66,7 @@ export function createEffectsController(button: HTMLButtonElement) {
     ambientKind = null
   }
   const syncAmbient = () => {
-    const scene = resolveAudioScene(clock, weather)
-    const nextKind =
-      scene === 'rain' || scene === 'thunderstorm' ? 'rain' : scene === 'sleep' ? 'sleep' : null
+    const nextKind = ambienceAt(clock, weather)
     if (!enabled || !unlocked || document.hidden || !nextKind) {
       stopAmbient()
       return

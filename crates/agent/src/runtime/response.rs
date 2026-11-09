@@ -339,7 +339,7 @@ impl ResidentRuntime {
         };
         let mut outdated = false;
         let mut retry_tools = std::collections::BTreeSet::new();
-        for call in &calls {
+        for (index, call) in calls.iter().enumerate() {
             self.record(
                 world,
                 s,
@@ -351,7 +351,7 @@ impl ResidentRuntime {
                     outdated |= error.kind == ToolErrorKind::Outdated;
                     Err(error)
                 }
-                None => self.run_tool(world, s, round.id, call),
+                None => self.run_tool(world, s, round.id, index, call),
             };
             let value = match outcome {
                 Ok(ToolOutcome::Complete(value)) => json!({"ok":true,"result":value}),
@@ -393,6 +393,7 @@ impl ResidentRuntime {
         world: &mut World,
         s: &mut Session,
         request: u64,
+        call_index: usize,
         call: &ToolCall,
     ) -> Result<ToolOutcome, ToolError> {
         let documents = self.documents.entry(s.actor_id.clone()).or_default();
@@ -402,6 +403,7 @@ impl ResidentRuntime {
             index: &mut self.index,
             documents,
             request,
+            call_index,
         };
         tools::execute(&mut ctx, call)
     }
@@ -438,10 +440,12 @@ impl ResidentRuntime {
         s.memory.consolidate(world, &s.actor_id);
     }
 
-    /// 整理轮次收尾：刚回看了阅读内容就继续这一批；否则批次结束，失败按指数退避。
+    /// 整理轮次收尾：刚回看了阅读内容，或这一轮只调了回看工具（回看出错也算），就继续这一批，
+    /// 让模型看到结果或错误后再交 reflect；否则批次结束，失败按指数退避。
+    /// 海难环岛里两人都拿 read_content 查聊天，报错后整批推迟了两小时。
     fn finish_reflection_round(&mut self, world: &World, s: &mut Session, round: &RepliedRound) {
         let dialogue = &s.notebook.reading_dialogue;
-        let continue_reading = dialogue.last().is_some_and(|m| {
+        let read_something = dialogue.last().is_some_and(|m| {
             m.role == Role::Tool
                 && serde_json::from_str::<Value>(&m.content).is_ok_and(|v| {
                     v["ok"] == true
@@ -449,7 +453,22 @@ impl ResidentRuntime {
                             || v["result"].get("context_source").is_some()
                             || v["result"].get("source").is_some())
                 })
-        }) && dialogue.len() <= READING_DIALOGUE_MAX;
+        });
+        let only_looked = dialogue
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .is_some_and(|m| {
+                !m.calls.is_empty()
+                    && m.calls.iter().all(|c| {
+                        matches!(
+                            c.name.parse(),
+                            Ok(ToolName::ReadContent | ToolName::ContextRead)
+                        )
+                    })
+            });
+        let continue_reading =
+            (read_something || only_looked) && dialogue.len() <= READING_DIALOGUE_MAX;
         if continue_reading || s.notebook.request.take().is_none() {
             return;
         }

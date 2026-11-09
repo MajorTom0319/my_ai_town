@@ -11,7 +11,6 @@ import { initDiary } from '../diary'
 import { $ } from '../dom'
 import { installEmptyTown } from '../emptyTown'
 import type { EventsHandle } from '../events'
-import { lineLabel } from '../game/icons'
 import type { GameMap } from '../gameMap'
 import { initInfoPanel } from '../infoPanel'
 import { createResidentStrip } from '../info/strip'
@@ -24,6 +23,7 @@ import { installModelWait } from '../modelWait'
 import { autoUpdateBuiltin } from '../models/builtin'
 import { createModelSession } from '../models/session'
 import { createNotices } from '../notices'
+import { createTownPanel } from '../town/panel'
 import { installPauseHint, type PauseHint } from '../pauseHint'
 import { initProps } from '../props/page'
 import type { ClientMsg, JoinOutcome, ServerMsg, TemplateCard } from '../protocol'
@@ -48,6 +48,8 @@ interface ShellInputs {
   events: EventsHandle
   localeName: (id: string) => string
   topology: Topology
+  /** 重演录像：画面不连世界，这个页面没打开过小镇，离开时也不能去关（它可能正开在别的页面上跑） */
+  replay: boolean
   send: (msg: ClientMsg) => void
   /** 发出保存命令，按请求编号收回执；断线时以失败结束 */
   save: (command: SaveCommand, receipt: Receipt) => void
@@ -94,11 +96,13 @@ export function createPanels(input: ShellInputs) {
   const strip = createResidentStrip({
     map,
     container: $('map'),
+    dock: $('hud-left'),
     localeName,
     open: (id) => {
       props.closeCard()
       infoPanel.open(id)
     },
+    invite: () => void open.residents(),
     selected: () => infoPanel.selected(),
     avatarActive: () => avatar.active(),
   })
@@ -107,7 +111,13 @@ export function createPanels(input: ShellInputs) {
     events,
     localeName,
     onPossess: (id) => void avatar.possess(id),
-    onEditResident: withSelected((r) => session.enter(center.ensureResident(r))),
+    // 页签里改人设、长相、模型：保存走连接的回执；「去配置这个服务」打开右上角的设定
+    editor: {
+      send,
+      save: input.save,
+      openSettings: (pageId) => void session.enter(pageId),
+      residentName: (id) => observed.get(id)?.name,
+    },
     onOpenDiary: () => {
       // 没选中居民时用名册第一位：日记页左栏自带村民切换，不应弹名册
       const r = selectedResident() ?? [...observed.values()][0]
@@ -128,6 +138,11 @@ export function createPanels(input: ShellInputs) {
     onTalk: (id) => void avatar.talkTo(id),
     miracleReady: () => avatar.miracleReady(),
     onMiracle: (id, kind) => void avatar.miracle(id, kind),
+    onAdjustBody: (id, values, done) => {
+      const world_id = worldSettings.state()?.world_id
+      if (!world_id) return done(false, '还没读到世界设定')
+      input.save({ type: 'set_resident_body', world_id, resident_id: id, values }, done)
+    },
   })
   const resumeAgents = () => pages.speeds.choose(pages.speeds.current() || input.normalSpeed)
   /** 「在地图上定位」：先停止跟随，不然下一份名册就把镜头拉回跟着的人 */
@@ -158,12 +173,9 @@ export function createPanels(input: ShellInputs) {
     personName: (id) => observed.get(id)?.name,
   })
   const center = initSettingsCenter({
-    worldSettings,
     send,
     onBack: () => session.exit(),
     save: input.save,
-    townName: selectedMap.name,
-    selectedResident,
     map,
     game,
     openUsage: () => {
@@ -174,7 +186,14 @@ export function createPanels(input: ShellInputs) {
     townPrice: () => priceOf(models.options()[0]),
   })
   session.bind(center)
-  worldSettings.setOpenSettings(() => session.enter('worldview'))
+  // 世界观面板：这一局的世界观、规则和重置，从地图左上角的「世界观」打开（菜单里也有），地图留在背后
+  const town = createTownPanel({
+    world: worldSettings,
+    send,
+    townName: selectedMap.name,
+    onOpen: () => avatar.stopMoving(),
+  })
+  worldSettings.setOpenTown(town.open)
   const toast = createMapToast($('map'))
   /** 请人入住结束：回到地图，一句话说谁搬进来了、用哪个模型；镜头挪过去 */
   function joined(list: JoinOutcome[], failed: string[], model: ModelOption | null) {
@@ -183,7 +202,7 @@ export function createPanels(input: ShellInputs) {
     if (pages.residents.isOpen()) pages.residents.close()
     const names = list.map((j) => j.name ?? '').filter(Boolean)
     const how = model ? `用 ${model.name} 思考` : '连上模型后开始行动'
-    const start = pages.speeds.current() ? '' : ' · 点顶栏的「开始」让小镇动起来'
+    const start = pages.speeds.current() ? '' : ' · 点左上角的 ▶ 让小镇动起来'
     toast.show(`${namesOf(names)}搬进来了 · ${how}${start}`)
     lookAt(list[0].resident_id)
   }
@@ -197,7 +216,6 @@ export function createPanels(input: ShellInputs) {
   const pages = createPages(input, {
     session,
     infoPanel,
-    center,
     observed,
     overlay: (on) => avatar.overlay(on),
     modelOptions: () => models.options(),
@@ -226,11 +244,9 @@ export function createPanels(input: ShellInputs) {
     fixHold: (fix, provider) => fixHold(fix, provider),
   })
   const open = createOpeners({ avatar, pages, props, books, session })
-  $('open-residents').onclick = open.residents
+  // 菜单里的「消耗」「设定」（shell/plain.html）
   $('open-usage').onclick = open.usage
   $('open-settings').onclick = () => session.enter()
-  lineLabel($('open-usage'), 'chart', '消耗')
-  lineLabel($('open-settings'), 'settings', '设定')
   const emptyTown = installEmptyTown($('map'), {
     ready: () => !!worldSettings.state()?.ready,
     create: open.newVillager,
@@ -244,7 +260,19 @@ export function createPanels(input: ShellInputs) {
   })
   worldSettings.subscribe(emptyTown.sync)
   models.subscribe(emptyTown.refresh)
-  installBackToMaps(selectedMap, events, () => avatar.release())
+  // 离开小镇前：角色卡页签里还有没存的草稿先问一句，再交还化身控制
+  if (!input.replay)
+    installBackToMaps(selectedMap, events, async () => {
+      const unsaved = infoPanel.unsaved()
+      if (
+        unsaved.length &&
+        !confirm(
+          `还有没保存的修改：${unsaved.join('、')}。\n「确定」放弃修改并离开；「取消」留下来保存。`
+        )
+      )
+        return false
+      return avatar.release()
+    })
   // 信息栏按世界生理开关补画关掉的项
   worldSettings.subscribe(() => {
     const switches = worldSettings.state()?.physiology
@@ -299,7 +327,16 @@ export function createPanels(input: ShellInputs) {
     }
   )
   events.onImportant((clock, important) => notices.show(clock, important))
-  const parts = { session, chatHistory, chatBubbles, worldSettings, observed, infoPanel, strip }
+  const parts = {
+    session,
+    chatHistory,
+    chatBubbles,
+    worldSettings,
+    town,
+    observed,
+    infoPanel,
+    strip,
+  }
   const shell = {
     ...parts,
     ...{ books, props, center, notices, avatar, open, emptyTown, models, modelWait },
@@ -325,9 +362,9 @@ function createOpeners(parts: {
     residents: guarded(() => pages.residents.open()),
     newVillager: guarded(() => pages.residents.create()),
     library: guarded(() => pages.residents.open('library')),
-    props: guarded(() => props.open()),
+    // 「道具」开关道具浮窗；地图不支持摆道具时打开整页
+    props: guarded(() => (props.placing ? props.placing.toggle() : props.open())),
     books: guarded(() => books.open()),
-    placing: guarded(() => props.placing?.toggle()),
     usage: () => {
       // 只读消耗页保留控制租约和聊天；隐藏地图前清掉移动输入
       avatar.stopMoving()
@@ -336,13 +373,12 @@ function createOpeners(parts: {
   }
 }
 
-/** 整页替换地图页的几个页面，以及顶栏的开始/暂停钮 */
+/** 整页替换地图页的几个页面，以及时钟牌旁的开始/暂停钮 */
 function createPages(
   input: ShellInputs,
   panels: {
     session: ReturnType<typeof createSettingsSession>
     infoPanel: ReturnType<typeof initInfoPanel>
-    center: ReturnType<typeof initSettingsCenter>
     observed: Map<string, ResidentContext>
     /** 菜单等覆盖层打开时停止化身移动 */
     overlay: (open: boolean) => void
@@ -354,7 +390,7 @@ function createPages(
   }
 ) {
   const { map, events, localeName, send, game } = input
-  const { session, infoPanel, center, observed } = panels
+  const { session, infoPanel, observed } = panels
   const diary = initDiary({
     send,
     game,
@@ -378,7 +414,11 @@ function createPages(
       locateResident(id)
       infoPanel.follow(true)
     },
-    onOpenSettings: (r) => session.enter(center.ensureResident(r)),
+    // 名册上的「档案」：回到地图，打开他的角色卡，翻到人设
+    onOpenProfile: (r) => {
+      locateResident(r.id)
+      infoPanel.open(r.id, 'persona')
+    },
     // 住宅不算去处；默认图把道路和入口也登记成了处所，同样不列
     placeNames: () =>
       input.topology.places
@@ -415,6 +455,7 @@ interface RegisteredParts {
   chatHistory: ReturnType<typeof createChatHistory>
   chatBubbles: ChatBubbles | null
   worldSettings: ReturnType<typeof createWorldSettings>
+  town: ReturnType<typeof createTownPanel>
   diary: ReturnType<typeof initDiary>
   memory: ReturnType<typeof initMemory>
   infoPanel: ReturnType<typeof initInfoPanel>
@@ -502,7 +543,15 @@ function register(input: ShellInputs, p: RegisteredParts) {
     },
     p.session.panel,
     {
-      roster: ({ msg }) => input.audio.update(msg.clock, msg.environment?.kind),
+      roster: ({ msg, residents }) =>
+        input.audio.roster(
+          msg,
+          residents.map(({ member }) => member)
+        ),
+      // 不拦消息：事件栏、提示卡照常收到
+      handleMsg(m) {
+        if (m.type === 'event' && m.alert?.kind === 'death') input.audio.death(!!m.alert.killed)
+      },
       dispose: input.audio.dispose,
     },
     createWeatherPanel(send, map, input.game),
@@ -511,6 +560,7 @@ function register(input: ShellInputs, p: RegisteredParts) {
     p.chatHistory,
     mapPanel,
     p.worldSettings,
+    p.town.panel,
     hubs.roster,
     p.chatBubbles,
     events,

@@ -376,3 +376,148 @@ fn context_rejections_shrink_requests_persist_limits_and_stop_without_replaying_
     }
     assert_eq!(r.state().lifetime.calls, old_calls);
 }
+
+/// 陌生环境：已知地图不在 system 消息里（前缀照样稳定），观察带着记得的地方和眼前出去的路，
+/// 没去过的路不写名字；熟悉的世界照旧把全图放在 system 消息里。
+#[test]
+fn strangers_carry_their_known_map_in_the_observation_instead_of_the_prefix() {
+    let mut w = world();
+    let mut r = runtime(&mut w, spacious());
+    let familiar = request(&mut r, &mut w);
+    assert!(familiar.messages[0].content.contains("\"known_places\":"));
+    w.set_strangers(true);
+    let mut r = runtime(&mut w, spacious());
+    let q = request(&mut r, &mut w);
+    assert!(!q.messages[0].content.contains("\"known_places\":"));
+    let body: Value = serde_json::from_str(&q.messages.last().unwrap().content).unwrap();
+    let known = body["observation"]["known_places"].as_array().unwrap();
+    assert_eq!(known.len(), 1);
+    assert_eq!(known[0]["id"], "loc_a");
+    let exits = body["observation"]["exits"].as_array().unwrap();
+    assert_eq!(exits.len(), 1);
+    assert_eq!(exits[0]["to"], "loc_b");
+    assert!(exits[0]["name"].is_null(), "没去过的路只知道方向");
+}
+
+/// 建镇生成的落脚点跟着观察给出，停留时 target 填它就站过去；只列这个地方的。
+#[test]
+fn spots_of_the_current_place_are_listed_for_staying() {
+    let mut data: Value = serde_json::from_str(include_str!("fixtures/two_places.json")).unwrap();
+    data["stations"].as_array_mut().unwrap().extend([
+        json!({"id":"spot_loc_a_1","locale":"loc_a","name":"水边","kind":"slot"}),
+        json!({"id":"spot_loc_b_1","locale":"loc_b","name":"北边","kind":"slot"}),
+    ]);
+    let mut w = kernel::World::new(
+        kernel::Topology::from_json(&data.to_string(), &catalog()).unwrap(),
+        420.0,
+        need_rules(),
+    );
+    w.spawn("r1", "阿树", "loc_a").unwrap();
+    let mut r = runtime(&mut w, spacious());
+    let q = request(&mut r, &mut w);
+    let body: Value = serde_json::from_str(&q.messages.last().unwrap().content).unwrap();
+    assert_eq!(
+        body["observation"]["spots"],
+        json!([{"id":"spot_loc_a_1","name":"水边"}])
+    );
+    assert!(
+        body["observation"].get("tide").is_none(),
+        "没开玩法时观察里没有玩法那一栏，内置模型的题面不变"
+    );
+}
+
+#[test]
+fn waking_after_a_long_chat_starts_from_what_just_happened() {
+    use protocol::{InteractionCommand as Command, InteractionKind};
+    // 交谈轮次不推进生活这边的游标；聊得久，聊完醒来要先看到刚发生的事，而不是从最早一句补看
+    // （回声湾：到了灯塔还以为在老屋）。更早的只报条数，游标直接到最新。
+    let mut w = world();
+    w.spawn("neighbor_0", "阿禾", "loc_a").unwrap();
+    w.enable_agent("neighbor_0").unwrap();
+    let mut r = runtime(&mut w, spacious());
+    let revision = |w: &kernel::World, id: &str| w.actor(id).unwrap().actions.revision;
+    let offer = Command::Offer {
+        partner_id: "neighbor_0".into(),
+        interaction: InteractionKind::Talk,
+        message: "聊聊老屋".into(),
+    };
+    w.interact("r1", "chat", revision(&w, "r1"), &offer)
+        .unwrap();
+    let accept = Command::Reply {
+        interaction_id: "chat".into(),
+        accept: true,
+        message: "好".into(),
+    };
+    w.interact("neighbor_0", "accept", revision(&w, "neighbor_0"), &accept)
+        .unwrap();
+    for i in 0..16 {
+        let turn = request(&mut r, &mut w);
+        let say = tool_call(
+            &format!("say-{i}"),
+            "interact",
+            json!({"operation":"say","message":format!("老屋第{i}件事")}),
+        );
+        assert!(reply_with(&mut r, &mut w, &turn, "", vec![say]));
+        let answer = Command::Say {
+            interaction_id: "chat".into(),
+            message: format!("听你说第{i}件"),
+            to: Some("r1".into()),
+        };
+        w.interact(
+            "neighbor_0",
+            &format!("n{i}"),
+            revision(&w, "neighbor_0"),
+            &answer,
+        )
+        .unwrap();
+        w.step(1.1);
+    }
+    let leave = Command::Leave {
+        interaction_id: "chat".into(),
+        message: "我先走了，傍晚灯塔见".into(),
+    };
+    w.interact("neighbor_0", "bye", revision(&w, "neighbor_0"), &leave)
+        .unwrap();
+    let q = life_request(&mut r, &mut w);
+    let body: Value = serde_json::from_str(&q.messages.last().unwrap().content).unwrap();
+    let observation = &body["observation"];
+    let events = observation["events"].as_array().unwrap();
+    let texts: Vec<_> = events.iter().map(|e| e["text"].as_str().unwrap()).collect();
+    let newest = w.actor("r1").unwrap().journal.cursor();
+    assert_eq!(events.last().unwrap()["event_id"], newest);
+    assert!(texts.iter().any(|t| t.contains("傍晚灯塔见")), "{texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("老屋第0件事")));
+    assert!(observation["earlier_events"]["omitted"].as_u64().unwrap() > 0);
+    assert!(observation["earlier_events"]["speech"].as_u64().unwrap() > 0);
+    assert_eq!(observation["earlier_events"]["with"], json!(["阿禾"]));
+    assert!(!observation["earlier_events"]["places"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(q.stamp.seen_cursor, newest, "更早的不再一页页补看");
+}
+
+#[test]
+fn a_prop_someone_else_is_using_says_so_before_anyone_tries() {
+    // 一台咖啡机三个人抢：看不出有人在用，只能试了才知道，每次白花一次模型调用。
+    let mut w = world();
+    w.spawn("neighbor_0", "阿禾", "loc_a").unwrap();
+    w.enable_agent("neighbor_0").unwrap();
+    let mut r = runtime(&mut w, spacious());
+    let plan: Vec<protocol::ActionDraft> = serde_json::from_value(
+        json!([{"prop_id":"board","intent":{"verb":"查看公告栏","duration_minutes":30}}]),
+    )
+    .unwrap();
+    let revision = w.actor("neighbor_0").unwrap().actions.revision;
+    w.run_actions("neighbor_0", "look", revision, &plan)
+        .unwrap();
+    w.step(0.5);
+    let q = life_request(&mut r, &mut w);
+    let body: Value = serde_json::from_str(&q.messages.last().unwrap().content).unwrap();
+    let props = body["observation"]["visible_props"].as_array().unwrap();
+    let board = props.iter().find(|p| p["id"] == "board").unwrap();
+    let users = board["in_use"].as_str().unwrap();
+    assert!(users.starts_with("阿禾正在查看公告栏"), "{users}");
+    let stand = props.iter().find(|p| p["id"] == "fixture-board").unwrap();
+    assert!(stand.get("in_use").is_none(), "没人用的道具和原来一字不差");
+}

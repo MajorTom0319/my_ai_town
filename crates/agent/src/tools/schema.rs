@@ -25,7 +25,14 @@ macro_rules! variants {
     }};
 }
 
-pub(crate) fn fact_kinds() -> Vec<FactKind> {
+/// 等待能等到的事件。动作结果和阅读结果只来自自己手上的动作，等待时手上没有动作，永远等不到。
+pub(super) fn wait_events() -> Vec<FactKind> {
+    fact_kinds()
+        .into_iter()
+        .filter(|k| !matches!(k, FactKind::Action | FactKind::Readable))
+        .collect()
+}
+fn fact_kinds() -> Vec<FactKind> {
     variants!(FactKind {
         Observation,
         Readable,
@@ -87,6 +94,7 @@ pub(crate) fn interaction_kinds() -> Vec<InteractionKind> {
         Serve => InteractionKind::Serve { prop_id: s(), verb: s() },
         Walk => InteractionKind::Walk { leader: s(), locale: None },
         Appointment => InteractionKind::Appointment { locale: s(), at: 0.0 },
+        Touch => InteractionKind::Touch { gesture: protocol::Gesture::Hug },
     })
 }
 pub(crate) fn interaction_commands() -> Vec<InteractionCommand> {
@@ -179,7 +187,7 @@ fn tagged<T: Serialize>(
 fn items() -> Value {
     described(
         json!({"type":"array","items":{"type":"string"},"minItems":1,"maxItems":ITEMS_MAX}),
-        "实际物品 ID，来自 inventory 或可见道具",
+        "实际物品 ID，来自 inventory、可见道具或柜子里存的；同一堆只列一个 id，要几件就把它写几遍，由系统从这一堆里挑",
     )
 }
 
@@ -267,6 +275,12 @@ fn interaction() -> Value {
             }),
             vec!["locale", "at"],
         ),
+        InteractionKind::Touch { .. } => (
+            json!({
+                "gesture": described(json!({"type":"string","enum":["hold_hands","lean","hug"]}), "亲近的方式：hold_hands 牵手，lean 依偎，hug 拥抱")
+            }),
+            vec!["gesture"],
+        ),
     })
 }
 
@@ -347,6 +361,21 @@ pub(super) fn recall() -> Value {
 pub(super) fn inspect() -> Value {
     object(json!({"id":{"type":"string"}}), &["id"])
 }
+/// 玩法动作：能交哪些 action、target 怎么填由开着的玩法在工具说明里写。
+pub(super) fn mode_action() -> Value {
+    object(
+        json!({
+            "action": {"type":"string","minLength":1,"maxLength":32},
+            "target": {"type":"string","maxLength":32},
+            "text": string(MODE_TEXT_CHARS),
+            "reason": string(MODE_REASON_CHARS)
+        }),
+        &["action"],
+    )
+}
+/// 玩法动作里一段话、一句理由的上限。
+const MODE_TEXT_CHARS: usize = 600;
+const MODE_REASON_CHARS: usize = 200;
 pub(super) fn set_goal() -> Value {
     object(
         json!({
@@ -454,7 +483,7 @@ pub(super) fn wait_for() -> Value {
     object(
         json!({
             "minutes": {"type":"number","minimum":WAIT_MINUTES.start(),"maximum":WAIT_MINUTES.end()},
-            "event": enumeration(&fact_kinds()),
+            "event": enumeration(&wait_events()),
             "reason": string(WAIT_REASON_CHARS)
         }),
         &["reason"],

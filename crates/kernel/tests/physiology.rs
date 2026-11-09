@@ -128,6 +128,20 @@ fn exhausted_supply_and_competing_consumers_cannot_duplicate_effects() {
     // 两人同样经过了这段时间，差别只是吃到的那一份（夹具里每份 25 点）。
     let fullness = |id: &str| w.actor(id).unwrap().needs.fullness.value;
     close(fullness("a") - fullness("b"), 25.0);
+    // 自己吃的变化只在自己的动作结果里记一次，句子不写自己的名字：海难环岛里林晚读到
+    // 「林晚使用旧罐头……林晚饱腹恢复」，整理记忆时把自己当成了另一个人。
+    let meal: Vec<_> = w
+        .actor("a")
+        .unwrap()
+        .journal
+        .events
+        .iter()
+        .filter(|e| e.text.contains("饱腹恢复"))
+        .collect();
+    assert_eq!(meal.len(), 1, "{meal:?}");
+    assert_eq!(meal[0].kind, protocol::FactKind::Action);
+    let name = &w.actor("a").unwrap().name;
+    assert!(!meal[0].text.contains(&format!("{name}饱腹")), "{meal:?}");
     assert_eq!(json!(w.snapshot())["supplies"][&key], 0);
     assert!(common::run(
         &mut w,
@@ -197,4 +211,44 @@ fn ignored_thirst_warning_wakes_the_sleeper_again_at_the_collapse_line() {
         GroupStatus::Interrupted
     );
     assert!(w.actor("a").unwrap().needs.water.value > 0.0);
+}
+
+/// 走路比闲着累：同样过这段时间，走路的人精力按劳作速率、水分按劳作的水分消耗，各多掉一半；
+/// 身体面板的原因里写着。海难环岛里走了半天路的林晚和原地空等的周屿数值一模一样。
+#[test]
+fn walking_costs_half_of_labor_on_energy_and_water() {
+    let mut w = common::world_with(
+        common::two_places(json!([])),
+        420.0,
+        &[("a", "a", "loc_a"), ("b", "b", "loc_a")],
+    );
+    common::run(
+        &mut w,
+        "a",
+        "go",
+        json!({"intent":{"verb":"前往","locale":"loc_b"}}),
+    )
+    .unwrap();
+    w.step(0.5);
+    let causes = w.body_view("a").unwrap().causes;
+    assert!(
+        causes.iter().any(|c| c.contains("走路额外消耗")),
+        "{causes:?}"
+    );
+    let arrived = common::finish(&mut w, "a", "go");
+    let walked = arrived.ended_at - arrived.started_at.unwrap();
+    assert!(walked > 1.0, "要真走一段路：{walked}");
+    let needs = |id: &str| w.actor(id).unwrap().needs.clone();
+    let (a, b) = (needs("a"), needs("b"));
+    close(
+        b.energy.value - a.energy.value,
+        a.tuning.labor_rate * 0.5 * walked,
+    );
+    close(b.water.value - a.water.value, 0.02 * walked);
+    assert!(!w
+        .body_view("a")
+        .unwrap()
+        .causes
+        .iter()
+        .any(|c| c.contains("走路")));
 }

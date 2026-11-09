@@ -35,7 +35,7 @@ import { peopleCount, PICKS, recommendReason, roomLeft } from '../residents/reco
 import type { Receipt, SaveCommand } from '../connection'
 import type { ShellPanel } from '../shell/panel'
 import type { SpeedBar } from '../shell/topbar'
-import { DEFAULT_WORLDVIEW, type createWorldSettings } from '../worldSettings'
+import { DEFAULT_WORLDVIEW, townEntryHint, type createWorldSettings } from '../worldSettings'
 import { providerSaveCommand } from '../settings/providerCommands'
 
 const DONE_KEY = 'town:guide-done'
@@ -118,9 +118,9 @@ export function createGuide(d: GuideDeps) {
       d.save(command, (ok, message) => (ok ? resolve(message) : reject(Error(message))))
     )
 
-  /** 手机和电脑说法不同的地方：「更多」里的入口，电脑在顶栏 */
+  /** 手机和电脑说法不同的地方：菜单在手机底部、电脑右上角 */
   const phone = () => isCompact()
-  const usageAt = () => (phone() ? '「更多 · 消耗」' : '顶栏的「消耗」')
+  const usageAt = () => (phone() ? '底部「菜单 · 消耗」' : '右上角「菜单 · 消耗」')
   // 向导里的选择
   let step = 0
   let preset: ProviderPreset = PRESETS[0]
@@ -607,7 +607,7 @@ export function createGuide(d: GuideDeps) {
       free.length ? grid : el('p', '正在读取村民库…', 'dim'),
       el(
         'p',
-        `以后可以随时在${phone() ? '「居民」' : '顶栏'}新建自己的村民，或从村民库再请几位。`,
+        `以后可以随时点${phone() ? '「居民」' : '地图左上角的「邀请」'}新建自己的村民，或从村民库再请几位。`,
         'guide-note'
       ),
     ]
@@ -644,7 +644,7 @@ export function createGuide(d: GuideDeps) {
     }
     return [
       el('h2', '这是个什么样的小镇？'),
-      el('p', '写给居民看的背景，他们会照着生活。可以先用默认的，以后在设定里改。'),
+      el('p', `写给居民看的背景，他们会照着生活。可以先用默认的，以后${townEntryHint()}改。`),
       chips,
       text,
       ...(skipModel

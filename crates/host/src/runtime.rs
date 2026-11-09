@@ -37,6 +37,10 @@ pub(crate) struct Runtime {
     pub tasks: TaskPool,
     /// 上一次存盘是否失败；只在状态变化时写日志，避免每秒刷屏。
     pub save_failed: bool,
+    /// 录像：广播都过它一遍（见 host::recording）；和网络层共用一份
+    pub tape: host::recording::Tape,
+    /// 开新一卷录像要的小镇目录与地图；世界不存档时为空
+    pub reels: Option<crate::recording_commands::ReelSource>,
 }
 
 /// 一条消息发给谁。
@@ -150,7 +154,12 @@ impl Runtime {
             }
             ClientMsg::SetWorldview { request_id, .. }
             | ClientMsg::SetPhysiology { request_id, .. }
-            | ClientMsg::SetMiracles { request_id, .. } => ServerMsg::WorldSettingsSaved {
+            | ClientMsg::SetMiracles { request_id, .. }
+            | ClientMsg::SetClimate { request_id, .. }
+            | ClientMsg::SetRecording { request_id, .. }
+            | ClientMsg::DeleteRecording { request_id, .. }
+            | ClientMsg::SetStrangers { request_id, .. }
+            | ClientMsg::SetGameMode { request_id, .. } => ServerMsg::WorldSettingsSaved {
                 request_id: request_id.clone(),
                 ok: false,
                 message,
@@ -162,6 +171,16 @@ impl Runtime {
                 ok: false,
                 message,
                 preview: None,
+            },
+            ClientMsg::GetPlacementGrid { request_id, .. } => ServerMsg::PlacementGrid {
+                request_id: request_id.clone(),
+                grids: Vec::new(),
+            },
+            ClientMsg::PreviewPlacement { request_id, .. } => ServerMsg::PlacementPreview {
+                request_id: request_id.clone(),
+                ok: false,
+                message,
+                spot: None,
             },
             ClientMsg::JoinResident { op_id, .. } => ServerMsg::JoinResult {
                 op_id: op_id.clone(),
@@ -177,14 +196,21 @@ impl Runtime {
                 false,
                 message,
             ),
+            ClientMsg::SetResidentBody { request_id, .. } => ServerMsg::AgentSaved {
+                request_id: request_id.clone(),
+                ok: false,
+                message,
+            },
             // 没有专用回执：门槛只可能拦下其中的 SetSpeed。
             ClientMsg::Avatar { .. }
             | ClientMsg::AvatarInput { .. }
             | ClientMsg::GetChatHistory { .. }
             | ClientMsg::GetWorldSettings
+            | ClientMsg::GetRecordings
             | ClientMsg::GetProps
             | ClientMsg::ValidateProp { .. }
             | ClientMsg::SaveProp { .. }
+            | ClientMsg::DeleteProp { .. }
             | ClientMsg::SetSpeed { .. }
             | ClientMsg::GetModelConfig
             | ClientMsg::SetModelConfig { .. }
@@ -249,6 +275,30 @@ impl Runtime {
                 enabled,
                 ..
             } => self.save_miracles(request_id, enabled),
+            SetClimate {
+                request_id,
+                climate,
+                ..
+            } => self.save_climate(request_id, climate),
+            SetStrangers {
+                request_id,
+                enabled,
+                ..
+            } => self.save_strangers(request_id, enabled),
+            SetRecording {
+                request_id,
+                enabled,
+                ..
+            } => self.save_recording(request_id, enabled),
+            GetRecordings => Outcome::reply(self.recordings_msg()),
+            DeleteRecording {
+                request_id, reel, ..
+            } => self.delete_recording(request_id, &reel),
+            SetGameMode {
+                request_id,
+                game_mode,
+                ..
+            } => self.save_game_mode(request_id, game_mode),
             SetSpeed { speed, .. } => self.set_speed(speed, clients),
             ResetWorld { .. } => self.reset(),
             GetProps => Outcome::reply(self.props_message()),
@@ -265,6 +315,7 @@ impl Runtime {
                 request_id,
                 definition,
             } => self.save_prop(request_id, definition),
+            DeleteProp { request_id, id } => self.delete_prop(request_id, &id),
             RemoveProp { request_id, id, .. } => self.remove_prop(request_id, &id),
             PlaceProp {
                 request_id,
@@ -272,6 +323,13 @@ impl Runtime {
                 near,
                 ..
             } => self.place_prop(request_id, instance, near),
+            GetPlacementGrid { request_id, .. } => self.placement_grid(request_id),
+            PreviewPlacement {
+                request_id,
+                instance,
+                near,
+                ..
+            } => self.preview_placement(request_id, instance, near),
             GetPopulation => Outcome::reply(self.population_msg()),
             SetResidentAppearance {
                 request_id,
@@ -282,6 +340,12 @@ impl Runtime {
             } => {
                 self.set_resident_appearance(request_id, expected_revision, resident_id, appearance)
             }
+            SetResidentBody {
+                request_id,
+                resident_id,
+                values,
+                ..
+            } => self.set_resident_body(request_id, &resident_id, values, clients),
             GetResidentLibrary { filter } => Outcome::reply(self.library_msg(&filter)),
             GetResidentTemplate { template_id } => Outcome::reply(self.template_msg(&template_id)),
             SaveResidentTemplate {
@@ -313,6 +377,7 @@ impl Runtime {
                 name,
                 home,
                 model,
+                persona,
             } => self.join(
                 JoinRequest {
                     op_id,
@@ -322,6 +387,7 @@ impl Runtime {
                     name,
                     home,
                     model,
+                    persona: persona.map(|p| *p),
                 },
                 clients,
             ),
@@ -425,7 +491,10 @@ impl Runtime {
             rt.world = fresh;
             rt.avatar_control = Default::default();
             rt.population = population;
+            // 录像开关是这个小镇的习惯，重置世界不改它
+            let recording = rt.world_settings.recording;
             rt.world_settings = Default::default();
+            rt.world_settings.recording = recording;
             rt.speed = 0.0;
             Ok::<_, AgentError>(())
         });
@@ -440,6 +509,12 @@ impl Runtime {
             return Outcome::reply(error_msg(message));
         }
         println!("[host] 世界已重置：{}，已暂停", self.world.clock());
+        // 重置后是新的世界：上一卷录像收起，开新的一卷
+        if self.world_settings.recording {
+            if let Err(error) = self.start_reel() {
+                eprintln!("[host] 重置后开新的一卷录像失败：{error}");
+            }
+        }
         Outcome::none()
             .and_all(ServerMsg::WorldReset {
                 clock: self.world.clock(),
@@ -502,6 +577,7 @@ impl Runtime {
         }
         broadcast(clients, &self.roster());
         self.avatar_publish(clients);
+        self.report_tape(clients);
     }
 
     /// 这一拍的推进速度。平时按正常速度走，走路、交谈都看得清；只有大家都在做一件还要好一阵的事
@@ -528,9 +604,9 @@ impl Runtime {
         }
     }
 
-    /// 正常速度（模拟分钟 / 现实秒）：选定速度乘这张地图的基准。
+    /// 正常速度（模拟分钟 / 现实秒）：选定速度乘这张地图的基准，再乘开着的玩法此刻要的倍数（没开时是 1）。
     pub(crate) fn normal_pace(&self) -> f64 {
-        self.speed * self.base_pace()
+        self.speed * self.base_pace() * self.world.game_mode_tempo()
     }
 
     /// 选定速度为 1 时世界每秒走几分钟：让村民在画面上每秒走 WALK_UNITS_PER_SECOND 个地图单位。
@@ -656,19 +732,29 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::SetWorldview { world_id, .. }
         | ClientMsg::SetPhysiology { world_id, .. }
         | ClientMsg::SetMiracles { world_id, .. }
+        | ClientMsg::SetClimate { world_id, .. }
+        | ClientMsg::SetRecording { world_id, .. }
+        | ClientMsg::DeleteRecording { world_id, .. }
+        | ClientMsg::SetStrangers { world_id, .. }
+        | ClientMsg::SetGameMode { world_id, .. }
         | ClientMsg::RemoveProp { world_id, .. }
         | ClientMsg::PlaceProp { world_id, .. }
+        | ClientMsg::GetPlacementGrid { world_id, .. }
+        | ClientMsg::PreviewPlacement { world_id, .. }
         | ClientMsg::JoinResident { world_id, .. }
-        | ClientMsg::SetResidentAppearance { world_id, .. } => Some(world_id),
+        | ClientMsg::SetResidentAppearance { world_id, .. }
+        | ClientMsg::SetResidentBody { world_id, .. } => Some(world_id),
         // 化身命令自己核对世界，查加入结果按世界编号查不到就返回空。
         ClientMsg::Avatar { .. }
         | ClientMsg::AvatarInput { .. }
         | ClientMsg::GetResidentJoinResult { .. } => None,
         ClientMsg::GetChatHistory { .. }
         | ClientMsg::GetWorldSettings
+        | ClientMsg::GetRecordings
         | ClientMsg::GetProps
         | ClientMsg::ValidateProp { .. }
         | ClientMsg::SaveProp { .. }
+        | ClientMsg::DeleteProp { .. }
         | ClientMsg::SetSpeed { .. }
         | ClientMsg::GetModelConfig
         | ClientMsg::SetModelConfig { .. }
@@ -702,7 +788,8 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::RemoveProp { .. }
         | ClientMsg::PlaceProp { .. }
         | ClientMsg::JoinResident { .. }
-        | ClientMsg::SetResidentAppearance { .. } => true,
+        | ClientMsg::SetResidentAppearance { .. }
+        | ClientMsg::SetResidentBody { .. } => true,
         ClientMsg::SetSpeed { speed, .. } => *speed > 0.0,
         ClientMsg::Content { command, .. } => !matches!(command, ContentCommand::Detail { .. }),
         ClientMsg::Avatar { .. }
@@ -712,9 +799,18 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::SetWorldview { .. }
         | ClientMsg::SetPhysiology { .. }
         | ClientMsg::SetMiracles { .. }
+        | ClientMsg::SetClimate { .. }
+        | ClientMsg::SetRecording { .. }
+        | ClientMsg::GetRecordings
+        | ClientMsg::DeleteRecording { .. }
+        | ClientMsg::SetStrangers { .. }
+        | ClientMsg::SetGameMode { .. }
         | ClientMsg::GetProps
+        | ClientMsg::GetPlacementGrid { .. }
+        | ClientMsg::PreviewPlacement { .. }
         | ClientMsg::ValidateProp { .. }
         | ClientMsg::SaveProp { .. }
+        | ClientMsg::DeleteProp { .. }
         | ClientMsg::GetModelConfig
         | ClientMsg::SetModelConfig { .. }
         | ClientMsg::SetResidentModel { .. }

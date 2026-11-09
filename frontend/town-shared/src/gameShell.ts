@@ -3,7 +3,8 @@
 // 静态图集先画（ws 断了图也在），Roster 流驱动活物层与各面板；人物身份只来自服务器名册。
 import './style.css'
 import { createGameAudio } from './audio/controller'
-import { createConnection } from './connection'
+import type { MusicWorld } from './audio/scene'
+import { createConnection, type ConnectionEvents, type GameConnection } from './connection'
 import { $, query } from './dom'
 import { initEvents } from './events'
 import type { GameMap } from './gameMap'
@@ -11,11 +12,13 @@ import type { MapEntry, Topology } from './mapDocument'
 import { installLayout } from './shell/layout'
 import { createPanels, type Panels } from './shell/panels'
 import { createReconnectHint } from './shell/reconnect'
-import { installHelpMenu } from './shell/help'
+import { createGameMenu } from './shell/menu'
 import { installMapButtons, showConnection } from './shell/topbar'
 import { reopenTown } from './townApi'
 import { installMobileChrome } from './mobile/chrome'
 import { createGuide, guideDone } from './mobile/guide'
+import { prefabOf } from './prefabs'
+import { createPrefabSetup } from './prefabs/setup'
 import { createTips } from './mobile/tips'
 import { trackMapInsets } from './mapView'
 import { onBack, systemBars } from './platform'
@@ -26,7 +29,12 @@ export function startGameShell(
   map: GameMap,
   topology: Topology,
   decorate: () => void,
-  options: { normalSpeed?: number } = {}
+  /** musicWorld：地图风格定下放哪个世界的曲子，没有按海岸小镇；connection：重演录像时换掉 WebSocket */
+  options: {
+    normalSpeed?: number
+    musicWorld?: MusicWorld
+    connection?: (events: ConnectionEvents) => GameConnection
+  } = {}
 ) {
   // 界面类型只在这里定一次，作为参数交给各面板
   const game = false
@@ -34,11 +42,14 @@ export function startGameShell(
   $('app-title').textContent = selectedMap.name
   document.title = `${selectedMap.name} · AI小镇`
   const listeners = new AbortController()
-  const events = initEvents(game)
+  // 重演录像时不连世界，连接换成录像（town-2d 的 replay/）；拍摄页的动态不贴边
+  const replay = !!options.connection
+  const events = initEvents(game, !replay)
   map.onRenderNotice = (text) => events.pushLocal(text)
   const audio = createGameAudio(
     query<HTMLButtonElement>(document, '#music-toggle'),
-    query<HTMLButtonElement>(document, '#effects-toggle')
+    query<HTMLButtonElement>(document, '#effects-toggle'),
+    options.musicWorld
   )
   const localeName = (id: string) =>
     topology.locales.find((l) => l.id === id)?.name ??
@@ -47,50 +58,54 @@ export function startGameShell(
     id
   const reconnect = createReconnectHint($('map'))
   // 连接的回调只在 connect() 之后触发，那时面板都已建好
-  const connection = createConnection(
-    selectedMap.endpoint,
-    {
-      message: (message) => panels.registry.dispatch(message),
-      connected(recovered) {
-        showConnection(true)
-        if (recovered) {
-          reconnect.back()
-          events.pushLocal('已重新连上小镇')
-        }
-        panels.registry.connected()
-      },
-      disconnected() {
-        showConnection(false)
-        reconnect.lost()
-        events.pushLocal('小镇的连接断了，正在重新连接')
-        panels.registry.disconnected()
-      },
-      reopening: () => reconnect.reopening(),
-      // 另一个页面进了别的小镇：说清原因，玩家点「回到这个小镇」才重新打开（会挤掉那边）
-      displaced: (message) =>
-        reconnect.displaced(message, async () => {
-          const entry = await reopenTown(selectedMap.id, false)
+  const handlers: ConnectionEvents = {
+    message: (message) => panels.registry.dispatch(message),
+    connected(recovered) {
+      showConnection(true)
+      if (recovered) {
+        reconnect.back()
+        events.pushLocal('已重新连上小镇')
+      }
+      panels.registry.connected()
+    },
+    disconnected() {
+      showConnection(false)
+      reconnect.lost()
+      events.pushLocal('小镇的连接断了，正在重新连接')
+      panels.registry.disconnected()
+    },
+    reopening: () => reconnect.reopening(),
+    // 另一个页面进了别的小镇：说清原因，玩家点「回到这个小镇」才重新打开（会挤掉那边）
+    displaced: (message) =>
+      reconnect.displaced(message, async () => {
+        const entry = await reopenTown(selectedMap.id, false)
+        if (entry.mapHash !== selectedMap.mapHash) throw new Error('地图已变化')
+        selectedMap.endpoint = entry.endpoint
+        selectedMap.lease = entry.lease
+        connection.resume(entry.endpoint)
+      }),
+    local: (text, warning) => events.pushLocal(text, warning),
+  }
+  // 重演录像时不连世界，连接换成录像（town-2d 的 replay/）
+  const connection: GameConnection = options.connection
+    ? options.connection(handlers)
+    : createConnection(
+        selectedMap.endpoint,
+        handlers,
+        { townId: selectedMap.id, mapHash: selectedMap.mapHash },
+        // 世界进程不在了：请管理服务从存档重新打开，换新地址接着连；之后离开时用新的打开凭证关
+        async () => {
+          const entry = await reopenTown(selectedMap.id)
           if (entry.mapHash !== selectedMap.mapHash) throw new Error('地图已变化')
           selectedMap.endpoint = entry.endpoint
           selectedMap.lease = entry.lease
-          connection.resume(entry.endpoint)
-        }),
-      local: (text, warning) => events.pushLocal(text, warning),
-    },
-    { townId: selectedMap.id, mapHash: selectedMap.mapHash },
-    // 世界进程不在了：请管理服务从存档重新打开，换新地址接着连；之后离开时用新的打开凭证关
-    async () => {
-      const entry = await reopenTown(selectedMap.id)
-      if (entry.mapHash !== selectedMap.mapHash) throw new Error('地图已变化')
-      selectedMap.endpoint = entry.endpoint
-      selectedMap.lease = entry.lease
-      return entry.endpoint
-    }
-  )
+          return entry.endpoint
+        }
+      )
   const normalSpeed = options.normalSpeed ?? 1
   // 一句话建的小镇：世界观建议给首次对话框和开局向导，适合住进来的人给向导
   useTownCreation(selectedMap.id, selectedMap.creation)
-  const inputs = { normalSpeed, game, selectedMap, map, events, localeName, topology }
+  const inputs = { normalSpeed, game, selectedMap, map, events, localeName, topology, replay }
   const panels = createPanels({
     ...inputs,
     send: connection.send,
@@ -107,7 +122,7 @@ export function startGameShell(
   panels.registry.add(tips.panel)
   wireMap(map, panels, tips.picked)
   systemBars('paper')
-  // 开局向导：第一次进新世界时代替首次对话框，手机和电脑一样；手机在「更多」、电脑在顶栏「帮助」里重新打开
+  // 开局向导：第一次进新世界时代替首次对话框，手机和电脑一样；「菜单 → 帮助」里重新打开
   const guide = createGuide({
     send: connection.send,
     save: connection.save,
@@ -130,16 +145,30 @@ export function startGameShell(
     else if (tries > 0) setTimeout(() => lookAt(id, tries - 1), 100)
   }
   panels.registry.first(guide.panel)
+  // 预制小镇（建镇说明里记着 prefab）：第一次进镇时出开局设置，代替开局向导
+  const prefab = prefabOf(selectedMap.creation?.prefab)
+  const prefabSetup = createPrefabSetup({
+    send: connection.send,
+    worldSettings: panels.worldSettings,
+    modelOptions: () => panels.models.options(),
+    onFinish: (joined) => {
+      tips.start()
+      lookAt(joined[0])
+    },
+  })
+  panels.registry.first(prefabSetup.panel)
+  panels.models.subscribe(prefabSetup.refresh)
   // 回来的玩家（向导已走过）直接从手势提示开始；看过的提示不会再出
   if (guideDone()) tips.start()
   let guideOpened = false
-  // 每个新世界（还没设世界观）都走向导：第一次从头讲起，以后从「请居民」开始
+  // 每个新世界（还没设世界观）都走向导：第一次从头讲起，以后从「请居民」开始；预制小镇走开局设置
   panels.worldSettings.setFirstRun(() => {
     if (!guideOpened) {
       guideOpened = true
-      // 在设定里重置了世界：先回到地图，向导走完正好看到新来的人
+      // 重置了世界（世界观面板已随重置关上）；开着整页设定时也先回到地图，向导走完正好看到新来的人
       if (panels.session.inSettings()) panels.session.exit()
-      guide.open(guideDone() ? 2 : 0)
+      if (prefab) prefabSetup.open(prefab)
+      else guide.open(guideDone() ? 2 : 0)
     }
     return true
   })
@@ -147,7 +176,13 @@ export function startGameShell(
     tips.reset()
     tips.start()
   }
-  installHelpMenu({ openGuide: () => guide.open(), resetTips })
+  // 右上角「菜单」（手机在底部入口里）：世界观、居民、设定、消耗、帮助、选择小镇和声音
+  const menu = createGameMenu({
+    openTown: panels.town.open,
+    openResidents: panels.open.residents,
+    help: { openGuide: () => guide.open(), resetTips },
+    onOpen: () => panels.avatar.stopMoving(),
+  })
   const back = installBack(panels)
   const chrome = installMobileChrome({
     speeds: panels.speeds,
@@ -157,11 +192,8 @@ export function startGameShell(
     chatHistory: panels.chatHistory,
     open: panels.open,
     watchBooks: panels.books.watch,
-    openSettings: () => void panels.session.enter(),
+    menu,
     avatar: panels.avatar,
-    audio,
-    openGuide: () => guide.open(),
-    resetTips,
   })
   back.front()
   // 面板盖住地图的边变了：告诉镜头；盖得更多时，正在看的村民若被盖住就挪到露出来的那块

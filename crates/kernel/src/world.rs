@@ -29,6 +29,8 @@ pub enum Event {
 
 pub struct World {
     pub(crate) weather: Option<crate::weather::WeatherState>,
+    /// 开着的玩法（game_mode/），随快照保存；没开时为 None。
+    pub(crate) game_mode: Option<crate::game_mode::GameMode>,
     /// 加载时注入的二维自由行走几何，不写入世界快照。
     pub walk_map: Option<std::sync::Arc<crate::avatar::WalkMap>>,
     pub topo: Topology,
@@ -48,6 +50,10 @@ pub struct World {
     pub(crate) physiology: PhysiologySwitches,
     /// 化身神力开关（miracle.rs），随快照保存。
     pub(crate) miracles: bool,
+    /// 陌生环境：村民只知道到过的地方（exploration.rs），随快照保存。
+    pub(crate) strangers: bool,
+    /// 藏着的东西（道具编号）：找到过的人才看得见（exploration.rs），随快照保存。
+    pub(crate) concealed: std::collections::BTreeSet<String>,
     /// 空间放置器：由 host 注入，内核放置道具时向它要位置与通路。
     pub(crate) placer: Option<Box<dyn Placer>>,
     /// 道具动作引发的后续：定时事件、随机流（happenings.rs），随快照保存。
@@ -63,6 +69,7 @@ impl World {
     pub fn new(topo: Topology, start_minutes: f64, need_rules: NeedRules) -> Self {
         World {
             weather: None,
+            game_mode: None,
             walk_map: None,
             affordances: Affordances::build(&topo),
             contents: ContentState::from_topology(&topo),
@@ -76,6 +83,8 @@ impl World {
             need_rules,
             physiology: Default::default(),
             miracles: false,
+            strangers: false,
+            concealed: Default::default(),
             placer: None,
             happenings: Default::default(),
             walk_trails: Default::default(),

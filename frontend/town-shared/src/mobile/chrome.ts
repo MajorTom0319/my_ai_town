@@ -1,10 +1,11 @@
-// 手机布局的外框：底部六个入口、「更多」抽屉、地图右上角的两个圆钮，以及把村民卡变成底部抽屉。
-// 宽屏时这些节点由样式隐藏，桌面界面不变。开始/暂停钮手机和电脑共用（shell/topbar.ts）。
+// 手机布局的外框：底部六个入口、地图右上角的两个圆钮，以及把村民卡变成底部抽屉。最右边的「菜单」打开的
+// 是电脑右上角同一块菜单，从底部弹出。宽屏时这些节点由样式隐藏。时钟牌、开始钮、世界观手机和电脑共用。
 // 应用切到后台时让世界暂停，回来恢复原来的速度。
 import { $, button, el } from '../dom'
 import { countBadge } from '../design/ui'
 import type { EventsHandle } from '../events'
 import { gameIcon } from '../game/icons'
+import { pixelIcon, type PixelName } from '../game/pixel'
 import { isCompact, onBack, onLifecycle } from '../platform'
 import type { SpeedBar } from '../shell/topbar'
 import { bottomSheet, type Snap } from './sheet'
@@ -22,23 +23,20 @@ interface ChromeDeps {
   }
   /** 村民卡里的聊天记录：开着时返回键先关它 */
   chatHistory: { back(): boolean }
-  open: { residents(): void; props(): void; books(): void; usage(): void; placing(): void }
+  open: { residents(): void; props(): void; books(): void; usage(): void }
   /** 「书报」上的数字：没看过的新作品 */
   watchBooks: (update: (count: number) => void) => void
-  openSettings: () => void
-  avatar: { openEntry(): void; available(): boolean; active(): boolean }
-  audio: {
-    music: { enabled(): boolean; toggle(): void }
-    effects: { enabled(): boolean; toggle(): void }
+  /** 底部「菜单」打开的就是电脑右上角那块菜单（shell/menu.ts），从底部弹出 */
+  menu: {
+    toggle(): void
+    close(): void
+    isOpen(): boolean
+    onChange(listener: () => void): () => void
   }
-  /** 重新看开局向导 */
-  openGuide?: () => void
-  /** 新手提示从头再出一遍 */
-  resetTips?: () => void
+  avatar: { openEntry(): void; available(): boolean; active(): boolean }
 }
 
 export function installMobileChrome(d: ChromeDeps) {
-  const obsView = $('obs-view')
   const listeners = new AbortController()
   const { signal } = listeners
   // 一次只开一个浮层；返回键先关它
@@ -55,10 +53,11 @@ export function installMobileChrome(d: ChromeDeps) {
   const dock = el('nav', '', 'mobile-dock')
   dock.id = 'mobile-dock'
   dock.setAttribute('aria-label', '主要入口')
-  const entry = (name: string, icon: string, label: string, action: () => void) => {
+  // 底部入口的图标和电脑上的一样，是平涂像素画（地图右上角的两个圆钮仍用线条图标）
+  const entry = (name: string, icon: PixelName, label: string, action: () => void) => {
     const b = button('', action)
     b.dataset.dock = name
-    b.append(gameIcon(icon, true), el('span', label))
+    b.append(pixelIcon(icon), el('span', label))
     dock.append(b)
     return b
   }
@@ -75,7 +74,7 @@ export function installMobileChrome(d: ChromeDeps) {
     }
     syncDock()
   })
-  const avatarBtn = entry('avatar', 'person', '化身', () => {
+  const avatarBtn = entry('avatar', 'avatar', '化身', () => {
     closePopover()
     // 进入对话框在地图中间，先收起压在它上面的村民卡和事件列表
     d.infoPanel.collapse()
@@ -84,7 +83,7 @@ export function installMobileChrome(d: ChromeDeps) {
     d.avatar.openEntry()
   })
   avatarBtn.classList.add('dock-avatar')
-  entry('props', 'hand', '物品', () => {
+  entry('props', 'chest', '道具', () => {
     closePopover()
     d.open.props()
   })
@@ -93,83 +92,17 @@ export function installMobileChrome(d: ChromeDeps) {
     d.open.books()
   })
   d.watchBooks(countBadge(booksBtn, '书报'))
-  const moreBtn = entry('more', 'more', '更多', () =>
-    popover?.el === more ? closePopover() : openMore()
-  )
+  const menuBtn = entry('menu', 'bars', '菜单', () => {
+    closePopover()
+    d.menu.toggle()
+  })
   $('event-bar').after(dock)
   function syncDock() {
     eventsBtn.classList.toggle('on', d.events.expanded())
-    moreBtn.classList.toggle('on', popover?.el === more)
+    menuBtn.classList.toggle('on', d.menu.isOpen())
     avatarBtn.disabled = !d.avatar.available()
   }
-
-  // ---------- 「更多」抽屉 ----------
-  const more = el('div', '', 'm-pop m-more')
-  more.id = 'mobile-more'
-  more.hidden = true
-  const shade = el('div', '', 'm-shade')
-  shade.hidden = true
-  shade.onclick = () => closePopover()
-  obsView.append(shade, more)
-  const click = (id: string) => () => {
-    closePopover()
-    document.getElementById(id)?.click()
-  }
-  function openMore() {
-    closePopover()
-    const tile = (icon: string, label: string, action: () => void, state?: string) => {
-      const b = button('', action)
-      b.className = 'm-tile'
-      b.append(gameIcon(icon, true), el('span', label))
-      if (state) b.append(el('small', state))
-      return b
-    }
-    const toggle = (which: 'music' | 'effects') => () => {
-      d.audio[which].toggle()
-      openMore()
-    }
-    const tiles = el('div', '', 'm-tiles')
-    tiles.append(
-      tile('settings', '设定', () => {
-        closePopover()
-        d.openSettings()
-      }),
-      tile('chart', '消耗', () => {
-        closePopover()
-        d.open.usage()
-      }),
-      tile('plus', '摆道具', () => {
-        closePopover()
-        d.open.placing()
-      }),
-      tile('sound', '音乐', toggle('music'), d.audio.music.enabled() ? '开' : '关'),
-      tile('sound', '音效', toggle('effects'), d.audio.effects.enabled() ? '开' : '关'),
-      tile('map', '选择小镇', click('back-to-maps'))
-    )
-    more.replaceChildren(el('div', '', 'm-grip'), el('h2', '更多'), tiles)
-    for (const [label, action] of [
-      ['重新看开局向导', d.openGuide],
-      ['重新显示新手提示', d.resetTips],
-    ] as const) {
-      if (!action) continue
-      const row = button(label, () => {
-        closePopover()
-        action()
-      })
-      row.className = 'm-row'
-      more.append(row)
-    }
-    more.hidden = false
-    shade.hidden = false
-    popover = {
-      el: more,
-      close: () => {
-        more.hidden = true
-        shade.hidden = true
-      },
-    }
-    syncDock()
-  }
+  const offMenu = d.menu.onChange(syncDock)
 
   // ---------- 地图右上角：回到整图、俯角 ----------
   const zoom = document.querySelector<HTMLElement>('.map-zoom')
@@ -224,25 +157,29 @@ export function installMobileChrome(d: ChromeDeps) {
     onSwipe: (step) => d.infoPanel.cycle(step),
   })
   let wasHidden = panel.hidden
-  // 聊天记录是村民卡里的一整页，头部和把手都让给它：打开时拉到全屏，退回村民信息时回到原来的档
-  let beforeChat: Snap | null = null
+  // 聊天记录是村民卡里的一整页，人设、长相、模型页签要地方编辑：打开时拉到全屏，
+  // 退回近况时回到原来的档
+  const wantsFull = () =>
+    panel.classList.contains('chat-open') || (panel.dataset.tab ?? 'status') !== 'status'
+  let beforeFull: Snap | null = null
   new MutationObserver(() => {
-    const chat = panel.classList.contains('chat-open')
+    const full = wantsFull()
     if (wasHidden && !panel.hidden) {
-      d.events.collapse()
+      // 电脑上贴边的动态是地图旁边的一整列，和角色卡并排，不收
+      if (!$('obs-view').dataset.feedDock) d.events.collapse()
       syncDock()
-      beforeChat = chat ? 'peek' : null
+      beforeFull = full ? 'peek' : null
       // 先按默认高度排出头部，下一帧再量露头档
-      requestAnimationFrame(() => sheet.open(chat ? 'full' : 'peek'))
-    } else if (chat && !beforeChat) {
-      beforeChat = sheet.snap()
+      requestAnimationFrame(() => sheet.open(wantsFull() ? 'full' : 'peek'))
+    } else if (full && !beforeFull) {
+      beforeFull = sheet.snap()
       sheet.set('full')
-    } else if (!chat && beforeChat) {
-      if (!panel.hidden) sheet.set(beforeChat)
-      beforeChat = null
+    } else if (!full && beforeFull) {
+      if (!panel.hidden) sheet.set(beforeFull)
+      beforeFull = null
     }
     wasHidden = panel.hidden
-  }).observe(panel, { attributes: true, attributeFilter: ['hidden', 'class'] })
+  }).observe(panel, { attributes: true, attributeFilter: ['hidden', 'class', 'data-tab'] })
   // 住处、想法晚一步填上或换了长短：露头档跟着重新量，免得把一行字切成两半
   let remeasure = 0
   new MutationObserver(() => {
@@ -258,6 +195,10 @@ export function installMobileChrome(d: ChromeDeps) {
   const unregister = onBack(() => {
     if (!isCompact()) return false
     if (closePopover()) return true
+    if (d.menu.isOpen()) {
+      d.menu.close()
+      return true
+    }
     if (d.events.expanded()) {
       d.events.collapse()
       syncDock()
@@ -295,6 +236,7 @@ export function installMobileChrome(d: ChromeDeps) {
       clearInterval(timer)
       unregister()
       offLifecycle()
+      offMenu()
     },
   }
 }

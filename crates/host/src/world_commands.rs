@@ -4,7 +4,9 @@ use host::{
     world_settings::{instructions_chars, WorldSettings, INSTRUCTIONS_MAX_CHARS},
     HostError,
 };
-use protocol::{AgentState, Life, PhysiologySwitches, ServerMsg, WorldSettingsView};
+use protocol::{
+    AgentState, GameModeChoice, Life, PhysiologySwitches, ServerMsg, WorldSettingsView,
+};
 
 impl Runtime {
     /// 保存世界观是事务：所有居民改用新指令并存盘，任一步失败都回到修改前；无论成败都回发当前设定与 roster。
@@ -83,6 +85,109 @@ impl Runtime {
             })
     }
 
+    /// 改气候：和神力开关一样不暂停世界、不占修订号；存盘失败时撤回。回执后广播世界设定。
+    pub(crate) fn save_climate(
+        &mut self,
+        request_id: String,
+        climate: protocol::Climate,
+    ) -> Outcome {
+        let result = self
+            .transact(|rt| rt.world.set_climate(climate).map_err(HostError::from))
+            .map_err(|aborted| aborted.to_string());
+        Outcome::none()
+            .and_all(self.world_settings_msg())
+            .and_reply(ServerMsg::WorldSettingsSaved {
+                request_id,
+                ok: result.is_ok(),
+                message: result.err().unwrap_or_else(|| match climate {
+                    protocol::Climate::Temperate => "气候改成了温带：天气照常".into(),
+                    protocol::Climate::Tropical => {
+                        "气候改成了热带：不再下雪，雷暴少一半，淋雨湿得慢一半".into()
+                    }
+                }),
+            })
+    }
+
+    /// 打开或关掉玩法（不带 choice 是关掉）。没给种子时随机取一个：潮水圈从下一个天亮起公布第一圈，
+    /// 狼人杀按此刻镇上的村民发身份，执剑人之夜按此刻镇上的村民排座次、定身份。不暂停世界：玩法的公告到点会自己写进每个人的经历。
+    pub(crate) fn save_game_mode(
+        &mut self,
+        request_id: String,
+        choice: Option<GameModeChoice>,
+    ) -> Outcome {
+        let roll = |seed: Option<u32>| Some(seed.unwrap_or_else(|| rand::random::<u32>().max(1)));
+        let choice = choice.map(|c| match c {
+            GameModeChoice::Tide { seed } => GameModeChoice::Tide { seed: roll(seed) },
+            GameModeChoice::Werewolf { seed, day_hours } => GameModeChoice::Werewolf {
+                seed: roll(seed),
+                day_hours,
+            },
+            GameModeChoice::Swordholder { seed, day_hours } => GameModeChoice::Swordholder {
+                seed: roll(seed),
+                day_hours,
+            },
+        });
+        let result = self
+            .transact(|rt| {
+                rt.world.set_game_mode(choice.as_ref())?;
+                Ok::<_, HostError>(())
+            })
+            .map_err(|aborted| aborted.to_string());
+        Outcome::none()
+            .and_all(self.world_settings_msg())
+            .and_reply(ServerMsg::WorldSettingsSaved {
+                request_id,
+                ok: result.is_ok(),
+                message: result.err().unwrap_or_else(|| match choice {
+                    Some(GameModeChoice::Tide { .. }) => {
+                        "潮水圈已打开：下一个天亮公布第 1 圈，之后两天每天两圈，最后一圈公布时来船"
+                            .into()
+                    }
+                    Some(GameModeChoice::Werewolf { .. }) => {
+                        "狼人杀已打开：身份已发下，天亮开局；每天 16:30 敲钟、17:00 议事".into()
+                    }
+                    Some(GameModeChoice::Swordholder { .. }) => {
+                        "执剑人之夜已打开：天亮开局，16:30 敲钟、17:00 演说和投票，19:00 交接"
+                            .into()
+                    }
+                    None => "玩法已关掉，世界恢复原样".into(),
+                }),
+            })
+    }
+
+    /// 打开或关掉陌生环境：世界暂停，居民的旧安排作废、重新观察（已知地图变了）。
+    pub(crate) fn save_strangers(&mut self, request_id: String, enabled: bool) -> Outcome {
+        let result = self
+            .transact(|rt| {
+                if rt.world.strangers() != enabled {
+                    rt.speed = 0.0;
+                    rt.world.set_strangers(enabled);
+                    for r in rt.population.residents.values() {
+                        rt.driver.runtime.world_changed(
+                            &mut rt.world,
+                            &r.id,
+                            "世界设定已修改，请重新观察和安排",
+                        );
+                    }
+                }
+                Ok::<_, HostError>(())
+            })
+            .map_err(|aborted| aborted.to_string());
+        Outcome::none()
+            .and_all(self.world_settings_msg())
+            .and_reply(ServerMsg::WorldSettingsSaved {
+                request_id,
+                ok: result.is_ok(),
+                message: result.err().unwrap_or_else(|| {
+                    if enabled {
+                        "村民现在初来乍到：只知道眼下所在的地方和家，别处要走过去才知道".into()
+                    } else {
+                        "村民现在熟悉这里：知道每个地方在哪、能做什么".into()
+                    }
+                }),
+            })
+    }
+
     /// 开关变化后世界暂停，所有居民的旧安排作废、重新观察；数值不动。
     fn set_physiology(
         &mut self,
@@ -152,14 +257,18 @@ impl Runtime {
 
     pub(crate) fn world_settings_msg(&self) -> ServerMsg {
         let state = WorldSettingsView {
+            climate: self.world.climate(),
+            game_mode: self.world.game_mode().map(str::to_owned),
             max_chars: host::world_settings::MAX_WORLDVIEW_CHARS,
             miracles: self.world.miracles(),
+            strangers: self.world.strangers(),
             mock: self.driver.mock,
             model: self.driver.target.model.clone(),
             persistent: self.store.is_some(),
             physiology: self.world.physiology(),
             provider: self.driver.target.provider.clone(),
             ready: self.world_settings.ready(),
+            recording: self.world_settings.recording,
             revision: self.world_settings.revision,
             world_id: self.population.world_id.clone(),
             worldview: self.world_settings.worldview.clone(),

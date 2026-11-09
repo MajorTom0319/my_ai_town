@@ -2,9 +2,10 @@
 //! 世界标识与就绪门槛在 runtime 统一检查，这里只做各自的事务。
 use crate::runtime::{Outcome, Runtime};
 use host::{props::CORE_PREFIX, HostError};
-use kernel::props::{Definition, Instance, Placement};
+use kernel::props::{Definition, Instance, MissingMaterial, Placement};
 use protocol::{ContentCommand, PlaceNear, PlaceRef, PropPreview, PropsCatalog, ServerMsg};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Runtime {
     pub(crate) fn props_message(&self) -> ServerMsg {
@@ -25,6 +26,13 @@ impl Runtime {
                 residential: p.residential,
             })
             .collect();
+        let town_definitions = self
+            .world
+            .placed_definitions()
+            .into_iter()
+            .filter(|(reference, _)| !catalog.definitions.contains_key(reference))
+            .map(|(_, d)| definition_json(d))
+            .collect();
         let catalog = PropsCatalog {
             capabilities: kernel::props::capabilities(),
             definition_actions,
@@ -34,6 +42,7 @@ impl Runtime {
             persistent: self.prop_library.persistent(),
             schema_version: CATALOG_SCHEMA_VERSION,
             spatial: self.world.spatial_overrides(),
+            town_definitions,
             world_id: self.population.world_id.clone(),
         };
         ServerMsg::Props { catalog }
@@ -41,8 +50,18 @@ impl Runtime {
 
     /// 道具命令的统一回执：失败时带说明文字；成功后全员刷新道具列表。
     fn prop_reply(&self, request_id: String, result: Result<PropPreview, String>) -> Outcome {
+        self.prop_reply_saying(request_id, result, "操作完成".into())
+    }
+
+    /// 成功时回执写 `done`，其余同 prop_reply。
+    fn prop_reply_saying(
+        &self,
+        request_id: String,
+        result: Result<PropPreview, String>,
+        done: String,
+    ) -> Outcome {
         let (ok, message, preview) = match result {
-            Ok(preview) => (true, "操作完成".into(), Some(preview)),
+            Ok(preview) => (true, done, Some(preview)),
             Err(e) => (false, e, None),
         };
         let outcome = Outcome::reply(ServerMsg::PropResult {
@@ -81,13 +100,25 @@ impl Runtime {
         self.prop_reply(request_id, result)
     }
 
+    /// 从道具库删掉自己做的一件道具（所有版本）。只动道具库的文件、不改世界，所以不走存档事务；
+    /// 回执只写删了什么，镇上还摆着几件、在哪，页面按删除前的目录接在后面说。
+    pub(crate) fn delete_prop(&mut self, request_id: String, id: &str) -> Outcome {
+        let (result, done) = match self.prop_library.delete(id) {
+            Ok(name) => (Ok(PropPreview::Done {}), format!("已删除「{name}」")),
+            Err(e) => (Err(e.to_string()), String::new()),
+        };
+        self.prop_reply_saying(request_id, result, done)
+    }
+
     /// 移除是事务：世界改动加存盘，失败时恢复移除前的状态。
     pub(crate) fn remove_prop(&mut self, request_id: String, id: &str) -> Outcome {
+        let before = self.world.missing_materials();
         let result = self
             .transact(|rt| rt.world.remove_prop(id))
             .map(|()| PropPreview::Done {})
             .map_err(|aborted| aborted.to_string());
-        self.prop_reply(request_id, result)
+        let done = self.done_noting(&before);
+        self.prop_reply_saying(request_id, result, done)
     }
 
     pub(crate) fn place_prop(
@@ -96,8 +127,63 @@ impl Runtime {
         instance: Value,
         near: Option<PlaceNear>,
     ) -> Outcome {
+        let before = self.world.missing_materials();
         let result = self.place_library_prop(instance, near);
-        self.prop_reply(request_id, result)
+        let done = self.done_noting(&before);
+        self.prop_reply_saying(request_id, result, done)
+    }
+
+    /// 摆道具界面要的格子：各地点哪些格子能放、不能放的为什么。只回给发问的页面。
+    pub(crate) fn placement_grid(&self, request_id: String) -> Outcome {
+        Outcome::reply(ServerMsg::PlacementGrid {
+            request_id,
+            grids: self.world.placement_grids(),
+        })
+    }
+
+    /// 试放：照真放的校验和选点算出这件会落在哪，不改世界、不存档。
+    pub(crate) fn preview_placement(
+        &self,
+        request_id: String,
+        instance: Value,
+        near: Option<PlaceNear>,
+    ) -> Outcome {
+        let result = self.library_placement(instance).and_then(|placement| {
+            self.world
+                .preview_placement(&placement, near.as_ref())
+                .map_err(|e| e.to_string())
+        });
+        let (ok, message, spot) = match result {
+            Ok(spot) => (true, String::new(), spot),
+            Err(e) => (false, e, None),
+        };
+        Outcome::reply(ServerMsg::PlacementPreview {
+            request_id,
+            ok,
+            message,
+            spot,
+        })
+    }
+
+    /// 布置检查：这次放下或拿走以后新出现的材料缺口写进回执，比如放了营地空地却没有木头的来处。
+    fn done_noting(&self, before: &BTreeSet<MissingMaterial>) -> String {
+        let mut gaps: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+        for m in self.world.missing_materials().difference(before) {
+            gaps.entry((m.prop.clone(), m.action.clone()))
+                .or_default()
+                .push(m.item.clone());
+        }
+        if gaps.is_empty() {
+            return "操作完成".into();
+        }
+        let gaps: Vec<String> = gaps
+            .into_iter()
+            .map(|((prop, action), items)| format!("{prop}的「{action}」要{}", items.join("、")))
+            .collect();
+        format!(
+            "操作完成。注意：{}，这张图上没有地方能弄到",
+            gaps.join("；")
+        )
     }
 
     pub(crate) fn content_command(
@@ -154,6 +240,14 @@ impl Runtime {
         instance: Value,
         near: Option<PlaceNear>,
     ) -> Result<PropPreview, String> {
+        let placement = self.library_placement(instance)?;
+        self.transact(|rt| rt.world.place_prop_near(placement, near.as_ref()))
+            .map_err(|aborted| aborted.to_string())?;
+        Ok(PropPreview::Done {})
+    }
+
+    /// 页面发来的实例配上道具库里的定义；新实例编号须带玩家前缀。
+    fn library_placement(&self, instance: Value) -> Result<Placement, String> {
         let instance: Instance =
             serde_json::from_value(instance).map_err(|e| format!("实例格式错误：{e}"))?;
         if !instance.id.starts_with(USER_PREFIX) {
@@ -166,17 +260,10 @@ impl Runtime {
             .get(&instance.definition)
             .ok_or("道具版本不存在")?
             .clone();
-        self.transact(|rt| {
-            rt.world.place_prop_near(
-                Placement {
-                    instance,
-                    definition,
-                },
-                near.as_ref(),
-            )
+        Ok(Placement {
+            instance,
+            definition,
         })
-        .map_err(|aborted| aborted.to_string())?;
-        Ok(PropPreview::Done {})
     }
 }
 

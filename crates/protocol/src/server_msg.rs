@@ -11,6 +11,11 @@ use serde::Serialize;
 /// 运行世界的设定：世界观、模型与生理开关。线上按字段名字母序输出。
 #[derive(Debug, Clone, Serialize)]
 pub struct WorldSettingsView {
+    /// 气候：温带或热带（不下雪、雷暴少）。随存档保存，缺省为温带。
+    pub climate: crate::Climate,
+    /// 开着的玩法（如 "tide"）；没开时不出现。随存档保存。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_mode: Option<String>,
     pub max_chars: usize,
     /// 化身神力：化身能对够得着的人复活、治愈、补满。随存档保存，缺省为关。
     pub miracles: bool,
@@ -20,7 +25,12 @@ pub struct WorldSettingsView {
     pub physiology: crate::PhysiologySwitches,
     pub provider: String,
     pub ready: bool,
+    /// 录像开关：开着时把广播给页面的消息录进小镇目录，事后能重演、换角度拍素材。
+    /// 随存档保存，缺省为开；真的在录哪一卷看 `Recordings.live`。
+    pub recording: bool,
     pub revision: u64,
+    /// 陌生环境：村民初来乍到，只知道到过的地方。随存档保存，缺省为关。
+    pub strangers: bool,
     pub world_id: String,
     pub worldview: String,
 }
@@ -77,6 +87,19 @@ pub enum ServerMsg {
         #[serde(serialize_with = "crate::sorted")]
         preview: Option<crate::PropPreview>,
     },
+    /// 摆道具的格子（GetPlacementGrid 的回包）：每个能放东西的地点一份；没有空间地图的世界为空。
+    PlacementGrid {
+        request_id: String,
+        grids: Vec<crate::PlaceGrid>,
+    },
+    /// 试放的回包（PreviewPlacement）：ok 时 spot 是这件会落在哪、朝向和占地，没有空间地图的世界为
+    /// null；不 ok 时 message 说为什么放不下。
+    PlacementPreview {
+        request_id: String,
+        ok: bool,
+        message: String,
+        spot: Option<crate::PropPosition>,
+    },
     WeatherSaved {
         request_id: String,
         world_id: String,
@@ -88,6 +111,9 @@ pub enum ServerMsg {
     Roster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         environment: Option<crate::WeatherView>,
+        /// 开着的玩法此刻的状态（潮水圈：水边和下一圈）；没开时不出现
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        game_mode: Option<crate::GameModeView>,
         sim_minutes: f64,
         /// 展示用时钟，如 "D1 07:32"
         clock: String,
@@ -146,7 +172,7 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_binding: Option<ModelChoice>,
     },
-    /// 村民设定（人设、使用模型）的保存结果
+    /// 村民设定（人设、使用模型、身体数值）的保存结果
     AgentSaved {
         request_id: String,
         ok: bool,
@@ -161,6 +187,13 @@ pub enum ServerMsg {
     },
     /// 世界已重置：人口与历史清空，回到第一天并暂停；村民库保留
     WorldReset { clock: String },
+    /// 这个小镇录下的几卷（新的在前）与正在录的那一卷的编号（没在录时省略）。
+    /// 查询时只回给发出者；开始录、停下、删掉一卷时广播。
+    Recordings {
+        reels: Vec<crate::ReelView>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        live: Option<String>,
+    },
     /// 日志：按天归档的执行记录、想法与他自己写的「昨天」（观察仪日志页用）
     Diary {
         resident: String,

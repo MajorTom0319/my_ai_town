@@ -21,10 +21,21 @@ pub const HEAL_RATE: f64 = 0.08;
 pub const EXPOSURE_NEEDS: [Need; 3] = [Need::Fullness, Need::Water, Need::Energy];
 /// 劳作时水分的额外消耗（每分钟）。
 const LABOR_WATER_COST: f64 = 0.04;
+/// 走路的额外消耗占劳作的几成。走路不像劳作那样累到一定程度就不让做：累了也得能走回去歇着。
+const WALK_SHARE: f64 = 0.5;
 /// 淋湿进度的上限：到这里着凉生病，进度清零。
 pub const WET_LIMIT: f64 = 90.0;
 /// 不淋雨雪时每分钟变干多少。
 const DRY_RATE: f64 = 1.0;
+
+/// 身体状况每分钟扣多少健康（轻重为 1 时；实际再乘轻重）。
+pub(crate) fn condition_damage(kind: C) -> f64 {
+    match kind {
+        C::Injury => 0.03,
+        C::Illness => 0.02,
+        C::Poison => 0.12,
+    }
+}
 
 /// 世界开关里该项是否开启。
 pub(crate) fn enabled(s: PhysiologySwitches, need: Need) -> bool {
@@ -55,9 +66,9 @@ pub(crate) struct Rates {
 }
 
 /// 速率来源的文案收集器：只有 body_view 需要，推进时传 None。
-type Trace<'a> = Option<&'a mut Vec<String>>;
+pub(crate) type Trace<'a> = Option<&'a mut Vec<String>>;
 
-fn note(trace: &mut Trace<'_>, text: impl FnOnce() -> String) {
+pub(crate) fn note(trace: &mut Trace<'_>, text: impl FnOnce() -> String) {
     if let Some(t) = trace {
         t.push(text());
     }
@@ -212,11 +223,7 @@ impl Needs {
 
     fn condition_rates(&self, r: &mut Rates, trace: &mut Trace<'_>) {
         for c in &self.body.conditions {
-            let damage = match c.kind {
-                C::Injury => 0.03,
-                C::Illness => 0.02,
-                C::Poison => 0.12,
-            } * c.severity;
+            let damage = condition_damage(c.kind) * c.severity;
             r.values[Need::Health] -= damage;
             if c.kind == C::Illness {
                 r.values[Need::Energy] -= 0.02 * c.severity;
@@ -288,31 +295,13 @@ impl Needs {
     /// 按速率推进 dt 分钟；返回是否穿越了紧急阈值，以及要发出的通知。
     fn advance(&mut self, r: &Rates, dt: f64) -> (bool, Vec<String>) {
         let targets = thresholds(&self.tuning);
-        let (ring, reset, collapse) = (
-            self.tuning.ring,
-            self.tuning.ring_reset,
-            self.tuning.collapse,
-        );
         let mut notices = Vec::new();
         let mut urgent = false;
         for need in Need::ALL {
             let track = self.track_mut(need);
             let old = track.value;
             track.value = snapped((old + r.values[need] * dt).clamp(EMPTY, FULL), &targets);
-            if track.value >= reset {
-                track.rang = false;
-            }
-            if old > ring && track.value <= ring && !track.rang {
-                track.rang = true;
-                urgent = true;
-                notices.push(format!("{}降低，需要关注身体状态", need.label()));
-            }
-            // 第一次提醒被放过去（比如夜里又睡回去）时，跌到崩溃线再提醒、再打断一次；
-            // 不然一路降到零就失能，家里有水有饭也只能等别人来救
-            if need != Need::Health && old > collapse && track.value <= collapse {
-                urgent = true;
-                notices.push(format!("{}极低，再不补充就撑不住了", need.label()));
-            }
+            urgent |= self.note_crossing(need, old, &mut notices);
         }
         self.body.wet = snapped(
             (self.body.wet + r.wet * dt).clamp(0.0, WET_LIMIT),
@@ -327,6 +316,43 @@ impl Needs {
             if old < GRACE[i] && self.body.exposure[i] >= GRACE[i] {
                 notices.push(format!("持续{}已达到损害时长", need.shortage()));
             }
+        }
+        (urgent, notices)
+    }
+
+    /// 一项需求从 old 变到当前值时的提醒规则，随时间推进和观察者调数值共用：回到复位线以上清掉
+    /// 已提醒的标记；跌破提醒线、之前没提醒过就提醒一次；跌破崩溃线再提醒一次。返回是否紧急。
+    fn note_crossing(&mut self, need: Need, old: f64, notices: &mut Vec<String>) -> bool {
+        let (ring, reset, collapse) = (
+            self.tuning.ring,
+            self.tuning.ring_reset,
+            self.tuning.collapse,
+        );
+        let track = self.track_mut(need);
+        let mut urgent = false;
+        if track.value >= reset {
+            track.rang = false;
+        }
+        if old > ring && track.value <= ring && !track.rang {
+            track.rang = true;
+            urgent = true;
+            notices.push(format!("{}降低，需要关注身体状态", need.label()));
+        }
+        // 第一次提醒被放过去（比如夜里又睡回去）时，跌到崩溃线再提醒、再打断一次；
+        // 不然一路降到零就失能，家里有水有饭也只能等别人来救
+        if need != Need::Health && old > collapse && track.value <= collapse {
+            urgent = true;
+            notices.push(format!("{}极低，再不补充就撑不住了", need.label()));
+        }
+        urgent
+    }
+
+    /// 观察者调过数值之后补上提醒；old 是调之前的数值。
+    pub(crate) fn note_adjusted(&mut self, old: NeedValues<f64>) -> (bool, Vec<String>) {
+        let mut notices = Vec::new();
+        let mut urgent = false;
+        for need in Need::ALL {
+            urgent |= self.note_crossing(need, old[need], &mut notices);
         }
         (urgent, notices)
     }
@@ -508,7 +534,9 @@ pub(crate) fn rates(w: &World) -> Vec<(String, Rates)> {
         .filter(|a| a.present() && !a.is_avatar())
         .map(|a| {
             let mut r = a.needs.rates(body_spot(w, a), None);
+            walking_rates(a, &mut r, &mut None);
             weather_rates(w, a, &mut r, &mut None);
+            w.game_mode_rates(a, &mut r, &mut None);
             (a.id.clone(), r)
         })
         .collect()
@@ -526,8 +554,27 @@ fn precipitation(kind: protocol::WeatherKind) -> Option<(f64, f64)> {
     }
 }
 
-/// 天气影响身体：开启时露天淋雨雪额外消耗精力、越来越湿；在室内、遮蔽处或不下雨雪时慢慢变干。
-/// 位置未知时不算淋着。
+/// 走路比闲着累：精力按需求参数里的劳作速率、水分按劳作的水分消耗，各取 `WALK_SHARE`。
+fn walking_rates(a: &Actor, r: &mut Rates, trace: &mut Trace<'_>) {
+    let n = &a.needs;
+    if n.body.dead || !a.current.is_travel() {
+        return;
+    }
+    if n.on(Need::Energy) {
+        r.values[Need::Energy] -= n.tuning.labor_rate * WALK_SHARE;
+    }
+    if n.on(Need::Water) {
+        r.values[Need::Water] -= LABOR_WATER_COST * WALK_SHARE;
+    }
+    n.note_enabled(
+        trace,
+        "走路额外消耗",
+        &[(Need::Energy, "精力"), (Need::Water, "水分")],
+    );
+}
+
+/// 天气影响身体：开启时露天淋雨雪额外消耗精力、越来越湿（热带湿得慢一半）；在室内、遮蔽处或
+/// 不下雨雪时慢慢变干。位置未知时不算淋着。
 fn weather_rates(w: &World, a: &Actor, r: &mut Rates, trace: &mut Trace<'_>) {
     let n = &a.needs;
     if !w.physiology.weather || n.body.dead {
@@ -540,6 +587,7 @@ fn weather_rates(w: &World, a: &Actor, r: &mut Rates, trace: &mut Trace<'_>) {
         .and_then(|weather| precipitation(weather.view.kind).map(|p| (weather.view.kind, p)));
     match exposed {
         Some((kind, (energy, wet))) => {
+            let wet = wet * w.climate().wet_scale();
             if n.on(Need::Energy) {
                 r.values[Need::Energy] -= energy;
             }
@@ -567,11 +615,13 @@ fn weather_rates(w: &World, a: &Actor, r: &mut Rates, trace: &mut Trace<'_>) {
     }
 }
 
-/// 当前速率的来源说明，加上天气的影响（观察仪与提示词用）。
+/// 当前速率的来源说明，加上天气和玩法的影响（观察仪与提示词用）。
 pub(crate) fn world_causes(w: &World, a: &Actor) -> Vec<String> {
     let mut causes = a.needs.causes(body_spot(w, a));
     let mut r = Rates::default();
+    walking_rates(a, &mut r, &mut Some(&mut causes));
     weather_rates(w, a, &mut r, &mut Some(&mut causes));
+    w.game_mode_rates(a, &mut r, &mut Some(&mut causes));
     causes
 }
 
