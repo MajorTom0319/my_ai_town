@@ -247,11 +247,20 @@ impl Runtime {
     }
 
     /// 页面发来的实例配上道具库里的定义；新实例编号须带玩家前缀。
-    fn library_placement(&self, instance: Value) -> Result<Placement, String> {
+    pub(crate) fn library_placement(&self, instance: Value) -> Result<Placement, String> {
+        self.library_placement_with(instance, USER_PREFIX)
+    }
+
+    /// 同上，前缀由调用方定：导演投放的道具用 `director:`，日志里分得清是谁放的。
+    pub(crate) fn library_placement_with(
+        &self,
+        instance: Value,
+        prefix: &str,
+    ) -> Result<Placement, String> {
         let instance: Instance =
             serde_json::from_value(instance).map_err(|e| format!("实例格式错误：{e}"))?;
-        if !instance.id.starts_with(USER_PREFIX) {
-            return Err(format!("新放置实例编号须使用 {USER_PREFIX} 前缀"));
+        if !instance.id.starts_with(prefix) {
+            return Err(format!("新放置实例编号须使用 {prefix} 前缀"));
         }
         let definition = self
             .prop_library

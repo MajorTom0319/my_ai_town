@@ -31,6 +31,7 @@ pub mod affordance;
 pub mod avatar;
 pub mod calendar;
 pub mod content;
+mod director;
 mod discovery;
 pub mod error;
 mod execution;

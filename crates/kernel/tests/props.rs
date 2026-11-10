@@ -94,3 +94,47 @@ fn condition_and_occupancy_are_authoritative_and_interrupt_keeps_elapsed_effects
     w.step(1.0);
     assert_eq!(w.actor("r").unwrap().needs.energy.value, value);
 }
+
+/// 导演只能经内核发通知与预约：通知只到在场者，预约随快照保存、到点只通知所在这处的人。
+#[test]
+fn director_notice_and_schedule_reach_only_those_present() {
+    let mut w = world();
+    w.spawn("far", "远处的居民", "loc_b").unwrap();
+    w.director_announce("码头来船了", Some("loc_a")).unwrap();
+    let notices = |w: &World, who: &str| {
+        w.actor(who)
+            .unwrap()
+            .journal
+            .events
+            .iter()
+            .filter(|e| e.kind == protocol::FactKind::Notice)
+            .any(|e| e.text.contains("码头来船了"))
+    };
+    assert!(notices(&w, "r"));
+    assert!(!notices(&w, "far"));
+
+    let at = w
+        .director_schedule("夜里起雾", 30.0, Some("loc_b"))
+        .unwrap();
+    assert_eq!(at, 450.0);
+    let saved = w.snapshot();
+    let mut restored = common::world_with(
+        common::two_places(json!([])),
+        420.0,
+        &[("r", "居民", "loc_a"), ("far", "远处的居民", "loc_b")],
+    );
+    restored.restore_snapshot(saved).unwrap();
+    assert_eq!(restored.director_pending().len(), 1);
+    restored.step(31.0);
+    assert!(restored.director_pending().is_empty());
+    let fog = |w: &World, who: &str| {
+        w.actor(who)
+            .unwrap()
+            .journal
+            .events
+            .iter()
+            .any(|e| e.text.contains("夜里起雾"))
+    };
+    assert!(fog(&restored, "far"));
+    assert!(!fog(&restored, "r"));
+}

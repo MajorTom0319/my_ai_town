@@ -70,6 +70,17 @@
     >
       <span class="tool-slot"><i data-pixel="book"></i></span><span class="tool-name">书报</span>
     </button>
+    <button
+      id="open-director"
+      class="map-props-button"
+      type="button"
+      aria-pressed="false"
+      aria-controls="director-panel"
+      aria-label="世界导演"
+      title="对世界下指令：投放道具、发通知、预约事件、贴公告"
+    >
+      <span class="tool-slot"><i data-pixel="scroll"></i></span><span class="tool-name">导演</span>
+    </button>
   </div></template
 >
 <!-- 右栏是角色卡：在地图上选中村民后点「资料」打开。顶上是像素小人和想法，名字和住处跟在下面；
@@ -162,6 +173,14 @@
       <button type="button" id="menu-town">
         <span class="menu-slot"><i data-pixel="scroll"></i></span><b>世界观</b
         ><small>规则 · 重置</small>
+      </button>
+      <button
+        type="button"
+        id="menu-director"
+        title="对世界下指令：投放道具、发通知、预约事件、贴公告"
+      >
+        <span class="menu-slot"><i data-pixel="scroll"></i></span><b>导演</b
+        ><small>对世界下指令</small>
       </button>
       <button type="button" id="menu-residents">
         <span class="menu-slot"><i data-pixel="people"></i></span><b>居民</b

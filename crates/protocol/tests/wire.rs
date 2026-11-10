@@ -76,6 +76,8 @@ fn server_variants() -> Vec<String> {
         JoinPreview,
         ResidentJoined,
         JoinResult,
+        DirectorReply,
+        DirectorState,
     })
 }
 
@@ -131,6 +133,8 @@ fn client_variants() -> Vec<String> {
         GetNotebookDetail,
         GetAgentLimits,
         SetAgentLimits,
+        DirectorSay,
+        GetDirectorState,
     })
 }
 

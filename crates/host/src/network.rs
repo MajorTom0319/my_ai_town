@@ -5,7 +5,7 @@ use protocol::{ClientMsg, EventInfo, ServerMsg};
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{
     mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError},
     Arc, Mutex,
@@ -19,8 +19,34 @@ use tungstenite::{
     Message, WebSocket,
 };
 
+/// 一条待发的服务端消息，带上它算不算「暂定」。
+///
+/// 名册、事件、化身状态每秒都在更新、再来一条就顶替旧的；回执、导演的一轮回复只会到一次，
+/// 丢一条页面就一直等。队列快满时先保证后者：暂定的不再塞。
+#[derive(Clone)]
+pub(crate) struct Envelope {
+    text: String,
+    provisional: bool,
+}
+
+impl Envelope {
+    /// 可以丢的：名册、事件、化身状态这类每拍重发的。
+    fn provisional(msg: &ServerMsg) -> bool {
+        matches!(
+            msg,
+            ServerMsg::Roster { .. }
+                | ServerMsg::Event { .. }
+                | ServerMsg::AvatarState { .. }
+                | ServerMsg::AvatarResult { .. }
+                | ServerMsg::Usage { .. }
+        )
+    }
+}
+
 /// 每个连接最多积压这么多条待发消息（每拍至少广播一条名册）；超出说明客户端收不过来，断开这条连接。
-const OUTBOUND_QUEUE: usize = 1024;
+const OUTBOUND_QUEUE: usize = 512;
+/// 队列只剩这么多空位时，暂定的消息（名册、事件、化身状态）先不塞，留给回执和导演的回复。
+const OUTBOUND_RESERVE: usize = 64;
 /// 一次写入超过这么久没写完就断开这条连接。
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 连接线程读一条客户端消息最多等这么久，等完才回头发广播：等得越久，名册和化身状态晚到得越多、
@@ -30,7 +56,9 @@ const READ_WAIT: Duration = Duration::from_millis(5);
 const INPUT_QUEUE: usize = 32;
 
 pub(crate) struct Peer {
-    sender: SyncSender<String>,
+    sender: SyncSender<Envelope>,
+    /// 已放进发送队列、还没被连接线程取走的条数：背压时据此判断客户端是不是正在追赶。
+    queued: Arc<AtomicUsize>,
     /// 同一个套接字的副本：积压超限时从这里关闭，连接线程的读写随即失败退出。
     socket: TcpStream,
     /// 还没交给模拟循环的方向输入和到达的时刻，按先后排：化身按到达时刻换方向（见 avatar/tick.rs）。
@@ -40,9 +68,17 @@ pub(crate) struct Peer {
 impl Peer {
     /// 放进发送队列。连接已断开，或积压超限（这时关闭连接并记日志）时返回 false，
     /// 调用方把它移出连接表。
-    fn deliver(&self, connection: u64, message: String) -> bool {
+    fn deliver(&self, connection: u64, message: Envelope) -> bool {
+        // 队列快满时，每拍重发的消息（名册、事件、化身状态）不再塞，留给回执和导演的回复
+        let queued = self.queued.load(Ordering::Relaxed);
+        if message.provisional && queued + OUTBOUND_RESERVE >= OUTBOUND_QUEUE {
+            return true;
+        }
         match self.sender.try_send(message) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.queued.fetch_add(1, Ordering::Relaxed);
+                true
+            }
             Err(TrySendError::Full(_)) => {
                 eprintln!("[host] 连接 {connection} 积压超过 {OUTBOUND_QUEUE} 条消息，已断开");
                 let _ = self.socket.shutdown(Shutdown::Both);
@@ -122,12 +158,14 @@ pub(crate) fn listen(
             let Some(ws) = handshake(stream, token.as_deref(), greeting.as_deref()) else {
                 continue;
             };
-            let (tx, rx) = sync_channel::<String>(OUTBOUND_QUEUE);
+            let (tx, rx) = sync_channel::<Envelope>(OUTBOUND_QUEUE);
+            let queued = Arc::new(AtomicUsize::new(0));
             let id = ids.fetch_add(1, Ordering::Relaxed);
             accepted.lock().unwrap().insert(
                 id,
                 Peer {
                     sender: tx,
+                    queued: queued.clone(),
                     socket,
                     inputs: Vec::new(),
                 },
@@ -135,7 +173,7 @@ pub(crate) fn listen(
             let to_sim = to_sim.clone();
             let peers = accepted.clone();
             thread::spawn(move || {
-                serve_connection(ws, rx, to_sim.clone(), id, &peers);
+                serve_connection(ws, rx, queued, to_sim.clone(), id, &peers);
                 peers.lock().unwrap().remove(&id);
                 let _ = to_sim.send(NetworkEvent::Disconnected(id));
             });
@@ -183,7 +221,8 @@ fn handshake(
 /// 一条连接：把广播队列全部发出，再读一条客户端命令（超时即过），直到任一方向断开。
 fn serve_connection(
     mut ws: WebSocket<TcpStream>,
-    rx: Receiver<String>,
+    rx: Receiver<Envelope>,
+    queued: Arc<AtomicUsize>,
     to_sim: SyncSender<NetworkEvent>,
     connection: u64,
     peers: &Peers,
@@ -192,6 +231,7 @@ fn serve_connection(
         loop {
             match rx.try_recv() {
                 Ok(msg) => {
+                    queued.fetch_sub(1, Ordering::Relaxed);
                     if !send(&mut ws, connection, msg) {
                         return;
                     }
@@ -203,6 +243,8 @@ fn serve_connection(
         match ws.read() {
             Ok(Message::Text(txt)) => match serde_json::from_str::<ClientMsg>(&txt) {
                 Ok(msg) => {
+                    // 每秒都有的名册和化身状态可能在服务器里已经排了几百条。
+                    // 这时先塞的只会把回复挤到队尾或把连接挤断，宁可先不处理这条。
                     if matches!(msg, ClientMsg::AvatarInput { .. }) {
                         if let Some(peer) = peers.lock().unwrap().get_mut(&connection) {
                             if peer.inputs.len() >= INPUT_QUEUE {
@@ -213,6 +255,17 @@ fn serve_connection(
                         continue;
                     }
                     let request_id = msg.request_id().map(str::to_owned);
+                    let backlog = queued.load(Ordering::Relaxed);
+                    if backlog > OUTBOUND_QUEUE / 2 {
+                        let error = ServerMsg::Error {
+                            request_id,
+                            message: "小镇画面正在追上，稍等一息再试".into(),
+                        };
+                        if !send(&mut ws, connection, encode(&error)) {
+                            return;
+                        }
+                        continue;
+                    }
                     match to_sim.try_send(NetworkEvent::Command {
                         connection,
                         message: Box::new(msg),
@@ -248,8 +301,8 @@ fn serve_connection(
 }
 
 /// 发出一条消息；返回 false 时连接不能再用。写超时记日志，对方正常断开不记。
-fn send(ws: &mut WebSocket<TcpStream>, connection: u64, text: String) -> bool {
-    match ws.send(Message::Text(text)) {
+fn send(ws: &mut WebSocket<TcpStream>, connection: u64, text: Envelope) -> bool {
+    match ws.send(Message::Text(text.text)) {
         Ok(()) => true,
         Err(tungstenite::Error::Io(e))
             if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
@@ -264,8 +317,11 @@ fn send(ws: &mut WebSocket<TcpStream>, connection: u64, text: String) -> bool {
     }
 }
 
-fn encode(msg: &ServerMsg) -> String {
-    serde_json::to_string(msg).expect("服务端消息都能编码")
+fn encode(msg: &ServerMsg) -> Envelope {
+    Envelope {
+        text: serde_json::to_string(msg).expect("服务端消息都能编码"),
+        provisional: Envelope::provisional(msg),
+    }
 }
 
 /// 读不懂的命令：回一条错误。原文是 JSON 对象且带字符串编号（request_id，加入小镇是 op_id）时
@@ -306,5 +362,5 @@ pub(crate) fn broadcast(clients: &Clients, msg: &ServerMsg) {
         .lock()
         .unwrap()
         .retain(|id, peer| peer.deliver(*id, json.clone()));
-    clients.tape.record(msg, &json);
+    clients.tape.record(msg, &json.text);
 }

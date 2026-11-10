@@ -163,6 +163,103 @@ pub fn parse_tool_reply(response: &Value) -> Result<ModelReply, ModelError> {
     ModelReply::from_chat_completion(response)
 }
 
+/// 导演通道的响应解析：坏的工具调用只丢那一条，正文和其余可用的调用照常保留。
+/// 服务商常省略调用 id、把 arguments 直接给成对象或大小写不一致，这些都不该让玩家看到“没有回应”。
+pub fn parse_director_reply(response: &Value) -> Result<ModelReply, ModelError> {
+    use crate::conversation::{ModelReply, ToolCall, Usage};
+    let message = response
+        .pointer("/choices/0/message")
+        .ok_or_else(|| ModelError::Reply("响应缺少 assistant 消息".into()))?;
+    let mut thought = message["content"].as_str().unwrap_or_default().to_string();
+    let mut calls = Vec::new();
+    if let Some(items) = message["tool_calls"].as_array() {
+        for (index, item) in items.iter().enumerate() {
+            let Some(function) = item.get("function") else {
+                note_lost(&mut thought, "工具调用缺少 function");
+                continue;
+            };
+            let Some(name) = function["name"].as_str().filter(|n| !n.trim().is_empty()) else {
+                note_lost(&mut thought, "工具调用缺少名称");
+                continue;
+            };
+            let arguments = match &function["arguments"] {
+                Value::String(text) if text.trim().is_empty() => Value::Object(Default::default()),
+                Value::String(text) => match serde_json::from_str(text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        note_lost(&mut thought, &format!("「{name}」的参数不是有效 JSON：{e}"));
+                        continue;
+                    }
+                },
+                Value::Object(_) => function["arguments"].clone(),
+                Value::Null => Value::Object(Default::default()),
+                _ => {
+                    note_lost(&mut thought, &format!("「{name}」的参数不是对象"));
+                    continue;
+                }
+            };
+            let id = item["id"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("call_{index}"));
+            calls.push(ToolCall {
+                id,
+                name: name.trim().to_owned(),
+                arguments,
+            });
+        }
+    }
+    let mut result = ModelReply {
+        thought,
+        calls,
+        usage: Usage::from_chat_completion(response),
+    };
+    // 单独放松这里的校验：正文仍保留，超出的调用逐条丢弃。
+    let mut kept = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut notes = String::new();
+    for mut call in result.calls {
+        if kept.len() == 8 {
+            note_lost(&mut notes, "一次回复的工具调用超过 8 条");
+            break;
+        }
+        if call.id.len() > 96 || call.name.len() > 64 || !call.arguments.is_object() {
+            continue;
+        }
+        if !seen.insert(call.id.clone()) {
+            call.id = format!("call_{}", kept.len());
+            seen.insert(call.id.clone());
+        }
+        if call.arguments.to_string().len() > 16_000 {
+            note_lost(&mut notes, &format!("「{}」的参数过长", call.name));
+            continue;
+        }
+        kept.push(call);
+    }
+    if !notes.is_empty() {
+        if !result.thought.is_empty() {
+            result.thought.push('\n');
+        }
+        result.thought.push_str(notes.trim());
+    }
+    Ok(ModelReply {
+        thought: result.thought,
+        calls: kept,
+        usage: result.usage,
+    })
+}
+
+fn note_lost(thought: &mut String, message: &str) {
+    if message.is_empty() {
+        return;
+    }
+    if !thought.is_empty() {
+        thought.push('\n');
+    }
+    thought.push_str(&format!("（这一条工具调用没有执行：{message}）"));
+}
+
 /// 只有一条 user 消息的补全请求：连接测试、生成人物、规划地图。
 pub fn prompt_body(model: &str, prompt: &str) -> Value {
     json!({
@@ -522,6 +619,26 @@ mod tests {
         assert_eq!(plan["spec"]["name"], "山间办公所");
         assert_eq!(plan["worldview_suggestion"], "大家在五人办公处做事。");
         assert_eq!(plan["residents"][0], "阿澈，刚搬来");
+    }
+
+    /// 导演的一轮回复里有坏调用、缺 id、arguments 是对象：丢坏的那条，保留正文和能用的调用。
+    #[test]
+    fn a_director_reply_keeps_text_and_usable_calls_when_one_call_is_broken() {
+        let reply = parse_director_reply(&json!({"choices":[{"message":{
+            "content":"我先看看。",
+            "tool_calls":[
+                {"function":{"name":"look","arguments":"{}"}},
+                {"function":{"name":"inspect","arguments":"{\"actor\":"}},
+                {"id":"good","type":"function","function":{"name":"watch","arguments":{"minutes":60}}}
+            ]
+        }}]}))
+        .unwrap();
+        assert!(reply.thought.contains("我先看看。"));
+        assert!(reply.thought.contains("inspect"));
+        assert_eq!(reply.calls.len(), 2);
+        assert_eq!(reply.calls[0].name, "look");
+        assert_eq!(reply.calls[0].id, "call_0");
+        assert_eq!(reply.calls[1].arguments["minutes"], 60);
     }
 
     /// 真模型偶尔写完嵌套的长相就收尾、漏掉最外层的右括号；补齐后照样拿到人物和长相

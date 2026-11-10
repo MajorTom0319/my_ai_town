@@ -41,6 +41,20 @@ pub(crate) struct Runtime {
     pub tape: host::recording::Tape,
     /// 开新一卷录像要的小镇目录与地图；世界不存档时为空
     pub reels: Option<crate::recording_commands::ReelSource>,
+    /// 导演会话与在途轮次。
+    pub director: crate::conductor::Director,
+    /// 导演模型请求单独一个池：村民忙的时候输入框也能用。
+    pub director_tasks: TaskPool,
+    /// 这一拍要广播的导演轮次。
+    pub director_outbox: Vec<protocol::DirectorEntry>,
+    /// 最近的世界日志，导演每轮看到的那一段。
+    pub director_recent: std::collections::VecDeque<(String, String)>,
+    /// 这一拍收过导演轮次，存档时带上会话。
+    pub director_pending_persist: bool,
+    /// 导演放的或移除的道具，这一拍结束要广播道具目录。
+    pub director_props_changed: bool,
+    /// 启动模式：固定回复、正式模型。
+    pub mode: crate::startup::Mode,
 }
 
 /// 一条消息发给谁。
@@ -102,7 +116,12 @@ impl Runtime {
         let request_id = msg.request_id().map(str::to_owned);
         let outcome = match self.gate(&msg) {
             Some(rejection) => Outcome::reply(rejection),
-            None => self.dispatch(msg, connection, clients),
+            None => match msg {
+                ClientMsg::DirectorSay {
+                    request_id, text, ..
+                } => self.director_say(request_id, text),
+                other => self.dispatch(other, connection, clients),
+            },
         };
         let reply = |message: &mut ServerMsg| {
             if let ServerMsg::Error { request_id: id, .. } = message {
@@ -137,7 +156,7 @@ impl Runtime {
     }
 
     /// 按命令自己的回执类型退回；没有专用回执的用通用错误。
-    fn rejection(&self, msg: &ClientMsg, message: &str) -> ServerMsg {
+    pub(crate) fn rejection(&self, msg: &ClientMsg, message: &str) -> ServerMsg {
         let message = message.to_string();
         match msg {
             ClientMsg::SetWeather {
@@ -235,6 +254,22 @@ impl Runtime {
             | ClientMsg::GetNotebookDetail { .. }
             | ClientMsg::GetAgentLimits
             | ClientMsg::SetAgentLimits { .. } => error_msg(message),
+            // 导演指令不论卡在哪一步都用保存回执的形状回答：页面照常清输入框、报原因。
+            ClientMsg::DirectorSay { request_id, .. } => ServerMsg::AgentSaved {
+                request_id: request_id.clone(),
+                ok: false,
+                message,
+            },
+            // 读导演状态被拒（世界还没重置完）也回答一次，免得页面一直等。
+            ClientMsg::GetDirectorState => ServerMsg::DirectorState {
+                state: protocol::DirectorState {
+                    enabled: false,
+                    thinking: false,
+                    entries: vec![],
+                    pending: vec![],
+                    clock: self.world.clock(),
+                },
+            },
         }
     }
 
@@ -443,6 +478,8 @@ impl Runtime {
                 request_id,
                 query,
             } => self.notebook_detail(resident, request_id, &query),
+            DirectorSay { .. } => unreachable!("导演指令在 command 里先处理"),
+            GetDirectorState => self.director_state(),
             GetAgentLimits => Outcome::reply(self.driver.limits_view(&self.world)),
             GetUsage => Outcome::reply(self.driver.usage_view(&self.world)),
             SetAgentLimits { request_id, limits } => self.set_agent_limits(request_id, limits),
@@ -526,6 +563,7 @@ impl Runtime {
 
     /// 一拍：推进世界、收模型结果、发新请求、广播 roster。存盘或轨迹写入失败只写日志，不中断运行。
     pub(crate) fn tick(&mut self, clients: &Clients) {
+        self.director_tick();
         self.avatar_tick(clients);
         let content_before = self.world.contents().revision();
         let inventory_before = self.world.inventory().revision();
@@ -541,7 +579,7 @@ impl Runtime {
         } else {
             Vec::new()
         };
-        self.driver.dispatch(&self.world, events, clients);
+        self.note_director_events(events);
         let replied = match self.driver.receive(&mut self.world, clients) {
             Ok(replied) => replied,
             Err(error) => {
@@ -553,6 +591,7 @@ impl Runtime {
         let held = self.hold_if_needed(clients);
         let changed = inventory_before != self.world.inventory().revision()
             || content_before != self.world.contents().revision()
+            || std::mem::take(&mut self.director_pending_persist)
             || replied
             || held
             || !requests.is_empty();
@@ -577,6 +616,11 @@ impl Runtime {
         }
         broadcast(clients, &self.roster());
         self.avatar_publish(clients);
+        self.flush_director(clients);
+        if self.director_props_changed {
+            self.director_props_changed = false;
+            broadcast(clients, &self.props_message());
+        }
         self.report_tape(clients);
     }
 
@@ -675,10 +719,13 @@ impl Runtime {
             return Ok(());
         };
         let result = store.checkpoint_bundle(
-            &self.world,
-            self.speed,
-            &self.world_settings,
-            Some(&self.population),
+            host::persistence::Scene {
+                world: &self.world,
+                speed: self.speed,
+                world_settings: &self.world_settings,
+                population: Some(&self.population),
+                director: Some(self.director.save()),
+            },
             || Some(self.driver.save()),
             force,
         );
@@ -741,6 +788,7 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::PlaceProp { world_id, .. }
         | ClientMsg::GetPlacementGrid { world_id, .. }
         | ClientMsg::PreviewPlacement { world_id, .. }
+        | ClientMsg::DirectorSay { world_id, .. }
         | ClientMsg::JoinResident { world_id, .. }
         | ClientMsg::SetResidentAppearance { world_id, .. }
         | ClientMsg::SetResidentBody { world_id, .. } => Some(world_id),
@@ -752,6 +800,7 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::GetWorldSettings
         | ClientMsg::GetRecordings
         | ClientMsg::GetProps
+        | ClientMsg::GetDirectorState
         | ClientMsg::ValidateProp { .. }
         | ClientMsg::SaveProp { .. }
         | ClientMsg::DeleteProp { .. }
@@ -791,6 +840,7 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::SetResidentAppearance { .. }
         | ClientMsg::SetResidentBody { .. } => true,
         ClientMsg::SetSpeed { speed, .. } => *speed > 0.0,
+        ClientMsg::DirectorSay { .. } => true,
         ClientMsg::Content { command, .. } => !matches!(command, ContentCommand::Detail { .. }),
         ClientMsg::Avatar { .. }
         | ClientMsg::AvatarInput { .. }
@@ -806,6 +856,7 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::SetStrangers { .. }
         | ClientMsg::SetGameMode { .. }
         | ClientMsg::GetProps
+        | ClientMsg::GetDirectorState
         | ClientMsg::GetPlacementGrid { .. }
         | ClientMsg::PreviewPlacement { .. }
         | ClientMsg::ValidateProp { .. }

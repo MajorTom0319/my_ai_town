@@ -523,6 +523,7 @@ class PropsPage implements PropsView {
     if (structure === this.state.mapSignature) return
     this.state.mapSignature = structure
     this.deps.onUpdate(visibleOnMap(next), next.spatial)
+    this.deps.catalog?.(next)
   }
 
   private onResult(msg: Extract<ServerMsg, { type: 'prop_result' }>) {

@@ -13,6 +13,8 @@ export interface PropsDeps {
   map?: PlacingMap
   onLocate: (id: string, locale: string) => void
   onUpdate: (props: PropView[], spatial: PropCatalog['spatial']) => void
+  /** 每读到一份道具目录（含世界标识）时通知：导演要知道当前世界 */
+  catalog?: (catalog: PropCatalog) => void
   /** 村民编号 → 名字（谁在用这件东西）；不认识的编号返回 undefined */
   personName?: (id: string) => string | undefined
   /** 游戏界面 */

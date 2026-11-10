@@ -65,7 +65,7 @@ impl Happenings {
         self.dice = s;
         (s % 100) < percent
     }
-    fn push(&mut self, at: f64, what: What) {
+    pub(crate) fn push(&mut self, at: f64, what: What) {
         let i = self.pending.partition_point(|p| p.at <= at);
         self.pending.insert(i, Pending { at, what });
     }
@@ -200,8 +200,10 @@ impl World {
     }
 
     fn fire_event(&mut self, key: &str, text: &str, locale: &str, place: Option<ScheduledProp>) {
+        // 把道具放下去的处所；没有道具时就是事件本身的处所
+        let mut at = locale.to_string();
         if let Some(p) = place {
-            let at = p.locale.clone().unwrap_or_else(|| locale.to_string());
+            at = p.locale.clone().unwrap_or_else(|| locale.to_string());
             // 编号里的哈希取短的一段（props::short_hash），村民看得见、要拿来用
             let hash =
                 crate::props::short_hash(&format!("{key}/{}", self.minutes.to_bits()), |h| {
@@ -212,7 +214,7 @@ impl World {
                 instance: Instance {
                     id: id.clone(),
                     definition: p.prop.reference(),
-                    locale: at,
+                    locale: at.clone(),
                     name: None,
                     board: None,
                 },
@@ -237,7 +239,13 @@ impl World {
                 ),
             }
         }
-        self.announce(text);
+        // 导演预约的事只说给安排的那处（全场广播留给非导演事件以免两遍通知）；
+        // 别的定时事件仍按原规矩告诉所有在场的人。
+        if key.starts_with("director-") {
+            self.notify_locale(text, Some(&at));
+        } else {
+            self.announce(text);
+        }
     }
 
     /// 在场、活着的村民都会得知；作为通知进收件箱，也会唤醒在等通知的村民。

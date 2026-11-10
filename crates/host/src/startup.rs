@@ -9,7 +9,8 @@ use kernel::{avatar::WalkMap, default_tuning, weather::WeatherRules, World};
 use protocol::NeedRules;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-pub(crate) enum Mode {
+#[derive(Clone)]
+pub enum Mode {
     /// 真实模型（缺省）
     Llm,
     /// 固定回复源：离线演示等待与接续

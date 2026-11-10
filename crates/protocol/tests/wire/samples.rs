@@ -411,7 +411,47 @@ fn population(revision: u64) -> PopulationView {
 }
 
 pub fn server_samples() -> Vec<ServerMsg> {
+    let director_entry = DirectorEntry {
+        world_id: "w1".into(),
+        player: "在码头放一张长椅".into(),
+        reply: "放好了，也通知了码头附近的人。".into(),
+        effects: vec![
+            DirectorEffect {
+                tool: "place_prop".into(),
+                ok: true,
+                text: "在码头投放了长椅".into(),
+                error_kind: None,
+            },
+            DirectorEffect {
+                tool: "schedule".into(),
+                ok: false,
+                text: "没有这个地点：码头".into(),
+                error_kind: Some(DirectorErrorKind::World),
+            },
+        ],
+        error: None,
+    };
     vec![
+        ServerMsg::DirectorReply {
+            entry: DirectorEntry {
+                effects: vec![],
+                ..director_entry.clone()
+            },
+        },
+        ServerMsg::DirectorState {
+            state: DirectorState {
+                enabled: true,
+                thinking: false,
+                entries: vec![director_entry],
+                pending: vec![DirectorPending {
+                    at: 900.0,
+                    clock: "D2 09:00".into(),
+                    locale: "dock".into(),
+                    text: "码头来船".into(),
+                }],
+                clock: "D1 08:00".into(),
+            },
+        },
         ServerMsg::WeatherSaved {
             request_id: "weather-1".into(),
             world_id: "world-1".into(),
@@ -1666,6 +1706,12 @@ pub fn client_samples() -> Vec<ClientMsg> {
             },
         },
         ClientMsg::GetProps,
+        ClientMsg::GetDirectorState,
+        ClientMsg::DirectorSay {
+            request_id: "d1".into(),
+            world_id: "w1".into(),
+            text: "在码头放一张长椅，并通知村民".into(),
+        },
         ClientMsg::Content {
             request_id: "r3".into(),
             world_id: "w1".into(),

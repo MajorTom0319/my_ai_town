@@ -25,6 +25,15 @@ const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// 缺省存档文件名；村民记忆目录按它旁边的 residents/ 投影。
 pub const SAVE_FILE_NAME: &str = "world.json";
 
+/// 一次检查点要写的世界一侧：世界、速度、设定、人口，以及导演会话。
+pub struct Scene<'a> {
+    pub world: &'a World,
+    pub speed: f64,
+    pub world_settings: &'a WorldSettings,
+    pub population: Option<&'a Population>,
+    pub director: Option<protocol::DirectorSave>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SaveFile {
@@ -41,6 +50,9 @@ struct SaveFile {
     /// v3 起的人口登记；旧档没有，由启动配置迁移。
     #[serde(default)]
     population: Option<Population>,
+    /// 导演会话：玩家说过的指令、之后的回应、更早对话的摘要。旧档没有这个字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    director: Option<protocol::DirectorSave>,
 }
 
 /// 恢复结果：速度、世界设定、Agent 会话与人口登记（旧档为 None，交给调用者迁移）。
@@ -52,6 +64,7 @@ pub struct Restored {
     pub world_settings: WorldSettings,
     pub agent: Option<AgentSave>,
     pub population: Option<Population>,
+    pub director: Option<protocol::DirectorSave>,
 }
 
 pub struct SaveStore {
@@ -241,6 +254,7 @@ impl SaveStore {
             world_settings: saved.world_settings,
             agent: saved.resident_agent,
             population: saved.population,
+            director: saved.director,
         }))
     }
 
@@ -301,13 +315,17 @@ impl SaveStore {
     /// Agent 会话要整份克隆，`resident_agent` 在节流判断之后才调用。
     pub fn checkpoint_bundle(
         &mut self,
-        world: &World,
-        speed: f64,
-        world_settings: &WorldSettings,
-        population: Option<&Population>,
+        scene: Scene<'_>,
         resident_agent: impl FnOnce() -> Option<AgentSave>,
         force: bool,
     ) -> Result<bool, HostError> {
+        let Scene {
+            world,
+            speed,
+            world_settings,
+            population,
+            director,
+        } = scene;
         if !force && self.last_check.elapsed() < AUTOSAVE_INTERVAL {
             return Ok(false);
         }
@@ -322,6 +340,7 @@ impl SaveStore {
             world: world.snapshot(),
             resident_agent,
             population: population.cloned(),
+            director,
         };
         let bytes = serde_json::to_vec(&saved)
             .map_err(|e| HostError::Save(format!("编码存档失败：{e}")))?;

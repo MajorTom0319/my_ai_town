@@ -24,6 +24,7 @@ import { autoUpdateBuiltin } from '../models/builtin'
 import { createModelSession } from '../models/session'
 import { createNotices } from '../notices'
 import { createTownPanel } from '../town/panel'
+import { createDirectorPanel, type DirectorPanel } from '../director/panel'
 import { installPauseHint, type PauseHint } from '../pauseHint'
 import { initProps } from '../props/page'
 import type { ClientMsg, JoinOutcome, ServerMsg, TemplateCard } from '../protocol'
@@ -169,8 +170,19 @@ export function createPanels(input: ShellInputs) {
     },
     onLocate: locateProp,
     onUpdate: (list, spatial) => map.setProps(list, spatial),
+    catalog: (list) => {
+      worldId = list.world_id
+      director.onWorld(list.world_id)
+    },
     map: map.placeSpotAt ? map : undefined,
     personName: (id) => observed.get(id)?.name,
+  })
+  // 世界导演：地图右侧的浮窗，地图底部「导演」格和菜单里的「导演」都能开；世界标识取自道具目录
+  let worldId: string | undefined
+  const director = createDirectorPanel({
+    send,
+    save: input.save,
+    worldId: () => worldId,
   })
   const center = initSettingsCenter({
     send,
@@ -339,8 +351,9 @@ export function createPanels(input: ShellInputs) {
   }
   const shell = {
     ...parts,
-    ...{ books, props, center, notices, avatar, open, emptyTown, models, modelWait },
+    ...{ books, props, center, notices, avatar, open, emptyTown, models, modelWait, director },
     ...pages,
+    openDirector: () => director.open(),
   }
   return { ...shell, ...register(input, shell) }
 }
@@ -469,6 +482,7 @@ interface RegisteredParts {
   notices: ReturnType<typeof createNotices>
   emptyTown: ReturnType<typeof installEmptyTown>
   modelWait: ReturnType<typeof installModelWait>
+  director: DirectorPanel
 }
 
 /** 按顺序登记各面板；名册与世界重置由这里整理后再逐个通知 */
@@ -576,6 +590,7 @@ function register(input: ShellInputs, p: RegisteredParts) {
     // 书与公告只旁听道具目录，要排在道具页前面：道具页收到目录就认领了
     p.books.panel,
     p.props,
+    p.director,
     hubs.tuning,
     // 模型配置只旁听，排在设定中心前面
     p.models.panel,

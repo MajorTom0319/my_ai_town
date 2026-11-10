@@ -13,6 +13,8 @@ pub enum EventKind {
     Movement,
     /// 模型请求与响应的台账行
     Model,
+    /// 导演替玩家做的事：投放、通知、公告
+    Director,
 }
 
 /// 日志说的是谁：人物编号与当时的名字。
@@ -102,6 +104,13 @@ impl EventInfo {
     pub fn model() -> Self {
         Self {
             kind: EventKind::Model,
+            ..Self::default()
+        }
+    }
+    /// 导演替玩家做了一件改变世界的事。
+    pub fn director() -> Self {
+        Self {
+            kind: EventKind::Director,
             ..Self::default()
         }
     }

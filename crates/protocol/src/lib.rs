@@ -19,6 +19,7 @@ mod avatar;
 mod chat;
 mod client_msg;
 mod content;
+mod director;
 mod interactions;
 mod location;
 mod model_config;
@@ -51,6 +52,9 @@ pub use chat::{
 pub use client_msg::{ClientMsg, IntentDraft, UntilPredicate};
 pub use content::{
     ContentCommand, ContentDetail, ContentKind, ContentMetadata, ContentOrigin, ContentText,
+};
+pub use director::{
+    DirectorEffect, DirectorEntry, DirectorErrorKind, DirectorPending, DirectorSave, DirectorState,
 };
 pub use interactions::{
     Gesture, Interaction, InteractionCommand, InteractionKind, InteractionStatus,

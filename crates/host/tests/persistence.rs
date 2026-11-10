@@ -3,7 +3,10 @@ use crate::{
     avatar::{command, state},
     support::*,
 };
-use host::{persistence::SaveStore, world_settings::WorldSettings};
+use host::{
+    persistence::{SaveStore, Scene},
+    world_settings::WorldSettings,
+};
 use serde_json::{json, Value};
 use std::{fs, net::TcpStream, time::Instant};
 use tungstenite::WebSocket;
@@ -211,14 +214,34 @@ fn bad_or_incompatible_save_is_preserved_and_exclusive_lock_is_released() {
     w.note_thought("r1", "这件事要记得。", "测试");
     let settings = WorldSettings::default();
     store
-        .checkpoint_bundle(&w, 0.0, &settings, None, || None, true)
+        .checkpoint_bundle(
+            Scene {
+                world: &w,
+                speed: 0.0,
+                world_settings: &settings,
+                population: None,
+                director: None,
+            },
+            || None,
+            true,
+        )
         .unwrap();
     let original = fs::read(&path).unwrap();
     let blocked_temp = town.dir.join("world.tmp.tmp");
     fs::create_dir(&blocked_temp).unwrap();
     w.note_thought("r1", "这次写入会失败。", "测试");
     assert!(store
-        .checkpoint_bundle(&w, 0.0, &settings, None, || None, true)
+        .checkpoint_bundle(
+            Scene {
+                world: &w,
+                speed: 0.0,
+                world_settings: &settings,
+                population: None,
+                director: None,
+            },
+            || None,
+            true,
+        )
         .is_err());
     assert_eq!(fs::read(&path).unwrap(), original);
     fs::remove_dir(&blocked_temp).unwrap();
@@ -245,4 +268,76 @@ fn bad_or_incompatible_save_is_preserved_and_exclusive_lock_is_released() {
             .map(|r| r.speed),
         Some(0.0)
     );
+}
+
+/// 导演说一句“放一张单人床”：固定回复源只按题面道具表里的名字提议，世界仍由内核校验并放入广场；
+/// 同一轮既有正文也有提示，存档恢复后道具还在。
+#[test]
+fn director_places_a_library_prop_through_the_kernel() {
+    let mut town = Town::new();
+    let mut ws = town.start();
+    until(&mut ws, |m| m["type"] == "roster");
+    configure_world(&mut ws);
+    let world_id = query(&mut ws, "get_population", "population")["population"]["world_id"].clone();
+    let say = |ws: &mut WebSocket<TcpStream>| {
+        reply(
+            ws,
+            json!({"type":"director_say","request_id":"director-place","world_id":world_id,"text":"在广场放一张单人床"}),
+            "agent_saved",
+        )
+    };
+    let saved = say(&mut ws);
+    assert_eq!(saved["ok"], true, "{saved}");
+    let entry = until(&mut ws, |m| {
+        m["type"] == "director_reply" && m["entry"]["player"] == "在广场放一张单人床"
+    })["entry"]
+        .clone();
+    assert!(entry["error"].is_null(), "{entry}");
+    assert!(
+        !entry["reply"].as_str().unwrap_or_default().is_empty(),
+        "{entry}"
+    );
+    assert!(
+        entry["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["tool"] == "place_prop" && e["ok"] == true),
+        "{entry}"
+    );
+    let placed = until(&mut ws, |m| {
+        m["type"] == "props"
+            && m["catalog"]["instances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| {
+                    p["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("director:prop-"))
+                })
+    })["catalog"]["instances"]
+        .clone();
+    let bed = placed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| {
+            p["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("director:prop-"))
+        })
+        .unwrap();
+    assert_eq!(bed["locale"], "square");
+    assert_eq!(bed["name"], "单人床");
+    town.kill();
+    drop(ws);
+    let mut ws = town.start();
+    configure_world(&mut ws);
+    let after = query(&mut ws, "get_props", "props")["catalog"]["instances"].clone();
+    assert!(after
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "单人床" && p["locale"] == "square"));
 }

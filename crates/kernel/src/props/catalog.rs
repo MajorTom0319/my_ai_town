@@ -31,6 +31,14 @@ impl Catalog {
         }
         Ok(())
     }
+    /// 最新版定义。投放时只给编号就用最新版；已存档实例仍按自己记录的完整引用解析。
+    pub fn latest(&self, id: &str) -> Option<&Definition> {
+        self.definitions
+            .values()
+            .filter(|d| d.id == id)
+            .max_by_key(|d| d.version)
+    }
+
     pub fn resolve(&self, instance: &Instance) -> Result<Prop> {
         let definition = self
             .definitions

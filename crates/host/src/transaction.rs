@@ -53,25 +53,37 @@ impl<E: fmt::Display> fmt::Display for Aborted<E> {
     }
 }
 
+/// 已经开始、还没存盘的改动。导演一轮里可能先看、再改：看的时候要能看到改到一半的世界，
+/// 全部做完才存一次盘；失败时整轮撤回。
+pub(crate) struct Change {
+    before: Checkpoint,
+}
+
 impl Runtime {
     /// 执行改动并存盘；任一步失败就恢复到改动前。
     pub(crate) fn transact<T, E>(
         &mut self,
         change: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, Aborted<E>> {
-        let before = self.capture();
-        let cause = match change(self) {
-            Ok(value) => match self.checkpoint(true) {
-                Ok(()) => return Ok(value),
-                Err(error) => Abort::SaveFailed(error),
-            },
-            Err(error) => Abort::Rejected(error),
+        let started = self.begin_change();
+        let value = match change(self) {
+            Ok(value) => value,
+            Err(error) => return Err(started.abort(self, Abort::Rejected(error))),
         };
-        let leftovers = self.restore(before);
-        if !leftovers.is_empty() {
-            eprintln!("[host] 回滚失败，状态可能不一致：{}", leftovers.join("；"));
+        match started.commit(self) {
+            Ok(()) => Ok(value),
+            Err(aborted) => Err(Aborted {
+                cause: aborted.cause,
+                leftovers: aborted.leftovers,
+            }),
         }
-        Err(Aborted { cause, leftovers })
+    }
+
+    /// 记下改动前的状态；之后可以继续调用 `change` 想调几次调几次，最后 `commit` 或 `abort`。
+    pub(crate) fn begin_change(&self) -> Change {
+        Change {
+            before: self.capture(),
+        }
     }
 
     fn capture(&self) -> Checkpoint {
@@ -85,7 +97,6 @@ impl Runtime {
         }
     }
 
-    /// 每一项都恢复，不因前一项失败而跳过；返回没能恢复的项。
     fn restore(&mut self, before: Checkpoint) -> Vec<String> {
         let mut leftovers = Vec::new();
         if let Err(error) = self.world.restore_checkpoint(before.world) {
@@ -97,5 +108,32 @@ impl Runtime {
         self.world_settings = before.world_settings;
         self.speed = before.speed;
         leftovers
+    }
+}
+
+impl Change {
+    /// 存盘并确认改动；存盘失败时撤回。
+    pub(crate) fn commit<E>(self, runtime: &mut Runtime) -> Result<(), Aborted<E>> {
+        match runtime.checkpoint(true) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.abort(runtime, Abort::SaveFailed(error))),
+        }
+    }
+
+    /// 整轮撤回，返回没能恢复的部分。
+    pub(crate) fn abort<E>(self, runtime: &mut Runtime, cause: Abort<E>) -> Aborted<E> {
+        let leftovers = runtime.restore(self.before);
+        if !leftovers.is_empty() {
+            eprintln!("[host] 回滚失败，状态可能不一致：{}", leftovers.join("；"));
+        }
+        Aborted { cause, leftovers }
+    }
+
+    /// 不要这次改动了：撤回但不带回错误。用于调用方已经自己攒好了逐条的失败说明。
+    pub(crate) fn rollback(self, runtime: &mut Runtime) {
+        let leftovers = runtime.restore(self.before);
+        if !leftovers.is_empty() {
+            eprintln!("[host] 回滚失败，状态可能不一致：{}", leftovers.join("；"));
+        }
     }
 }

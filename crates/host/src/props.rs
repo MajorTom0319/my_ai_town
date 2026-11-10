@@ -69,6 +69,18 @@ impl PropLibrary {
             map_uses,
         })
     }
+    /// 能给世界投放的定义：内置地图道具和用户库都是已校验的道具库内容，每个编号只列最新版。
+    /// `core:` 前缀只限制覆盖与删除，不限制在地图上摆放；调用方仍须按这里的定义引用校验，
+    /// 不能把模型给的名字直接当成新定义。
+    pub fn placeable(&self) -> impl Iterator<Item = &Definition> {
+        let ids: BTreeSet<&str> = self
+            .catalog
+            .definitions
+            .values()
+            .map(|d| d.id.as_str())
+            .collect();
+        ids.into_iter().filter_map(|id| self.catalog.latest(id))
+    }
     pub fn persistent(&self) -> bool {
         self.root.is_some()
     }

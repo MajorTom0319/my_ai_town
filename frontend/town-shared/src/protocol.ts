@@ -836,6 +836,36 @@ export interface PlaceGrid {
   step: number
 }
 
+/** 导演一轮：玩家原话与执行了什么；只含世界操作的结果，不含村民私聊与心声 */
+export interface DirectorEntry {
+  world_id: string
+  player: string
+  reply: string
+  effects: DirectorEffect[]
+  /** 模型没回正文或整轮失败的原因 */
+  error?: string
+}
+export interface DirectorEffect {
+  tool: string
+  ok: boolean
+  text: string
+  /** 失败类别：参数、世界规则、导演规则或世界已变 */
+  error_kind?: 'invalid_arguments' | 'world' | 'rejected' | 'stale'
+}
+export interface DirectorPending {
+  at: number
+  clock: string
+  locale: string
+  text: string
+}
+export interface DirectorState {
+  enabled: boolean
+  thinking: boolean
+  entries: DirectorEntry[]
+  pending: DirectorPending[]
+  clock: string
+}
+
 export type ServerMsg =
   | { type: 'avatar_state'; state: AvatarState }
   | {
@@ -940,6 +970,8 @@ export type ServerMsg =
       model_binding?: ModelChoice
     }
   | { type: 'agent_saved'; request_id: string; ok: boolean; message: string }
+  | { type: 'director_reply'; entry: DirectorEntry }
+  | { type: 'director_state'; state: DirectorState }
   /**
    * 通用错误：命令无法执行、格式错误、读取失败或保存失败。request_id 是引起错误的命令自带的编号
    * （加入小镇是操作编号）；周期存盘失败这类不是由命令引起的错误没有。
@@ -1085,6 +1117,9 @@ export type ClientMsg =
       game_mode?: GameModeChoice | null
     }
   | { type: 'get_props' }
+  /** 导演：说一句，回 agent_saved 表示收到；结果随后以 director_reply 广播 */
+  | { type: 'director_say'; request_id: string; world_id: string; text: string }
+  | { type: 'get_director_state' }
   | {
       type: 'validate_prop' | 'save_prop'
       request_id: string

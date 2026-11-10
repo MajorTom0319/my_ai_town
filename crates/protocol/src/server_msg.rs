@@ -278,4 +278,8 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<JoinOutcome>,
     },
+    /// 导演说了什么、做了什么：广播给所有连接，面板按轮次渲染。
+    DirectorReply { entry: crate::DirectorEntry },
+    /// 导演会话与待触发事项；只回给发问的页面。
+    DirectorState { state: crate::DirectorState },
 }

@@ -11,6 +11,8 @@
 //! 启动阶段的错误（配置损坏、存档不匹配）打印后退出；运行中的客户端命令不会让进程退出。
 
 mod avatar;
+#[path = "conductor/mod.rs"]
+mod conductor;
 mod join;
 mod library_commands;
 mod network;
@@ -121,6 +123,7 @@ struct Saved {
     world_settings: WorldSettings,
     agent: Option<AgentSave>,
     population: Option<Population>,
+    director: Option<protocol::DirectorSave>,
 }
 
 /// 打开存档并恢复到世界里。旧档（v1/v2）没有登记表：从存档自己的人物表补建，人口从此是存档自己的状态。
@@ -178,6 +181,7 @@ fn build_runtime(
         })
         .transpose()?;
     let saved = restore(&mut store, &mut world)?;
+    let director_saved = saved.director.clone();
     host::maps::walk::restore_prop_positions(&mut world, args.save_file.as_deref())?;
     world.avatar_leave()?;
     // 新世界一律空村：没有种子村民，居民只能从村民库加入。
@@ -246,6 +250,13 @@ fn build_runtime(
         save_failed: false,
         tape: Default::default(),
         reels,
+        director: conductor::Director::new(director_saved),
+        director_tasks: host::tasks::TaskPool::new(1, 2),
+        director_outbox: Vec::new(),
+        director_recent: Default::default(),
+        director_pending_persist: false,
+        director_props_changed: false,
+        mode: args.mode.clone(),
     })
 }
 

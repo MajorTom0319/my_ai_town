@@ -343,6 +343,15 @@ pub enum ClientMsg {
         request_id: String,
         limits: AgentLimits,
     },
+    /// 对导演说一句话：导演按一句话里的要求调用世界命令。回执是 AgentSaved（记下来了），
+    /// 结果随后以 DirectorReply 广播。世界没设定好、导演已关或在等上一条回复时拒绝。
+    DirectorSay {
+        request_id: String,
+        world_id: String,
+        text: String,
+    },
+    /// 读导演会话与待触发事项（回 DirectorState）。
+    GetDirectorState,
 }
 
 impl ClientMsg {
@@ -383,7 +392,8 @@ impl ClientMsg {
             | ArchiveResidentTemplate { request_id, .. }
             | GetNotebook { request_id, .. }
             | GetNotebookDetail { request_id, .. }
-            | SetAgentLimits { request_id, .. } => Some(request_id),
+            | SetAgentLimits { request_id, .. }
+            | DirectorSay { request_id, .. } => Some(request_id),
             JoinResident { op_id, .. } | GetResidentJoinResult { op_id, .. } => Some(op_id),
             AvatarInput { .. }
             | GetWorldSettings
@@ -398,6 +408,7 @@ impl ClientMsg {
             | PreviewTemplatePersona { .. }
             | PreviewResidentJoin { .. }
             | GetDiary { .. }
+            | GetDirectorState
             | GetAgentLimits => None,
         }
     }

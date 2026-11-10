@@ -186,6 +186,19 @@ impl Interactions {
         })
     }
 
+    /// 本人参与的最近互动，按创建时间倒序。导演只读这份历史来理解剧情；
+    /// 给村民的观察仍走 `observation`，只含本人实际听到的台词。
+    pub fn seen_by(&self, actor: &str, limit: usize) -> Vec<&Interaction> {
+        let mut items: Vec<_> = self.items.values().filter(|i| i.includes(actor)).collect();
+        items.sort_by(|a, b| {
+            b.created_at
+                .total_cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        items.truncate(limit);
+        items
+    }
+
     /// 本人参与的互动：未结束的在前，其余按创建时间倒序，最多 12 项。
     pub fn for_actor(&self, actor: &str) -> Vec<&Interaction> {
         let mut items: Vec<_> = self.items.values().filter(|i| i.includes(actor)).collect();

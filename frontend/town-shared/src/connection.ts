@@ -19,6 +19,7 @@ export type SaveCommand = DistributiveOmit<
         | 'set_agent_limits'
         | 'set_resident_appearance'
         | 'set_resident_body'
+        | 'director_say'
     }
   >,
   'request_id'

@@ -13,6 +13,11 @@ use protocol::{
 };
 use std::collections::BTreeSet;
 
+/// 设定中心选的工具模型；导演用它。没选或服务商不存在时为空。
+pub(crate) fn active_target(settings: &Settings) -> Option<LlmTarget> {
+    LlmTarget::active(&settings.providers, &settings.credentials)
+}
+
 pub(crate) struct Settings {
     pub providers: config::ProvidersFile,
     pub credentials: config::Credentials,
