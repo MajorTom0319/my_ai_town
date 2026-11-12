@@ -84,7 +84,7 @@ export function createDirectorPanel(deps: {
   const note = document.createElement('p')
   note.className = 'director-note'
   note.textContent =
-    '导演只提议：道具、通知、事件、公告都经世界内核校验后执行。没有可用工具模型时请先在设定里选一个。'
+    '导演操作经内核校验后执行。预约按模拟时间计时，暂停时不推进；到点执行并显示结果，失败不会当作成功。没有可用工具模型时请先在设定里选一个。'
   side.append(sideTitle, pending, note, tips)
 
   const form = document.createElement('form')
@@ -210,8 +210,7 @@ export function createDirectorPanel(deps: {
 
   /** 对话：只重建发生变化的整条记录；条目不会改写，比较长度与最后一条即可 */
   function renderLog(entries: DirectorEntry[], thinking: boolean) {
-    const last = entries[entries.length - 1]
-    const key = `${entries.length}:${last ? last.player : ''}:${thinking}`
+    const key = JSON.stringify([entries, thinking])
     if (shown === key) return
     shown = key
     log.replaceChildren()
@@ -245,10 +244,24 @@ export function createDirectorPanel(deps: {
     }
     if (entry.error && !entry.reply) reply.classList.add('error')
     box.append(ask, reply)
-    if (entry.effects.length) {
+    const effects = entry.effects.filter(
+      (effect) =>
+        !effect.ok ||
+        ![
+          'look',
+          'survey',
+          'watch',
+          'inspect',
+          'read_content',
+          'trace',
+          'history',
+          'world',
+        ].includes(effect.tool)
+    )
+    if (effects.length) {
       const list = document.createElement('ul')
       list.className = 'director-effects'
-      for (const effect of entry.effects) {
+      for (const effect of effects) {
         const item = document.createElement('li')
         item.className = effect.ok ? 'ok' : 'bad'
         const tool = document.createElement('code')
@@ -256,7 +269,15 @@ export function createDirectorPanel(deps: {
         item.append(tool, document.createTextNode(` ${effect.text}`))
         list.append(item)
       }
-      box.append(list)
+      if (effects.every((effect) => effect.ok)) {
+        const details = document.createElement('details')
+        const summary = document.createElement('summary')
+        summary.textContent = `执行结果（${effects.length} 项）`
+        details.append(summary, list)
+        box.append(details)
+      } else {
+        box.append(list)
+      }
     }
     return box
   }
@@ -298,6 +319,10 @@ export function createDirectorPanel(deps: {
     close: () => setOpen(false),
     isOpen: () => !root.hidden,
     handleMsg(message: ServerMsg): boolean {
+      if (message.type === 'roster' && state) {
+        clock.textContent = message.clock
+        return false
+      }
       if (message.type === 'director_state') {
         render(message.state)
         return false

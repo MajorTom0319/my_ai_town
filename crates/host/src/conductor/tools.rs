@@ -16,7 +16,21 @@ impl Runtime {
     /// 读工具只回答问题，不改变世界；先读的事实用于后面同一轮的写操作，写操作不进入下一轮。
     pub(crate) fn director_apply(&mut self, reply: &agent::conversation::ModelReply) {
         let mut effects = Vec::new();
-        let started = self.begin_change();
+        let started = reply
+            .calls
+            .iter()
+            .any(|call| {
+                matches!(
+                    call.name.as_str(),
+                    "announce"
+                        | "schedule"
+                        | "place_prop"
+                        | "remove_prop"
+                        | "post_bulletin"
+                        | "set_weather"
+                )
+            })
+            .then(|| self.begin_change());
         let mut changes = 0;
         let mut rolled_back = false;
         for call in &reply.calls {
@@ -36,10 +50,17 @@ impl Runtime {
                     };
                     effects.push(effect);
                 }
-                "narrate" => effects.push(done("narrate", "记下了一段旁白".into())),
+                "narrate" => match text_arg(&call.arguments, "text") {
+                    Ok(text) => effects.push(done("narrate", text)),
+                    Err(mut effect) => {
+                        effect.tool = call.name.clone();
+                        effects.push(effect);
+                    }
+                },
                 "announce" | "schedule" | "place_prop" | "remove_prop" | "post_bulletin"
                 | "set_weather" => {
                     if changes == CALLS_PER_ROUND {
+                        rolled_back = true;
                         effects.push(failed(
                             &call.name,
                             DirectorErrorKind::Rejected,
@@ -50,20 +71,27 @@ impl Runtime {
                     changes += 1;
                     match self.director_change(&call.name, &call.arguments) {
                         Ok(effect) => effects.push(effect),
-                        Err(effect) => {
+                        Err(mut effect) => {
+                            if effect.tool.is_empty() {
+                                effect.tool = call.name.clone();
+                            }
                             rolled_back = true;
                             effects.push(effect);
                         }
                     }
                 }
-                other => effects.push(failed(
-                    other,
-                    DirectorErrorKind::InvalidArguments,
-                    "没有这个工具",
-                )),
+                other => {
+                    rolled_back = true;
+                    effects.push(failed(
+                        other,
+                        DirectorErrorKind::InvalidArguments,
+                        "没有这个工具",
+                    ));
+                }
             }
         }
         if changes > 0 {
+            let started = started.expect("改变世界的调用已建立事务");
             let edits_catalog = reply.calls.iter().any(|c| {
                 matches!(
                     c.name.as_str(),
@@ -73,12 +101,15 @@ impl Runtime {
             if rolled_back {
                 // 已有条目失败时整轮不提交：世界停在改动前，给玩家看的仍是各条的失败原因。
                 started.rollback(self);
+                retract(&mut effects);
             } else {
-                self.director_props_changed = self.director_props_changed || edits_catalog;
                 match started.commit::<host::HostError>(self) {
-                    Ok(()) => effects.push(done("world", "改动已保存".into())),
+                    Ok(()) => {
+                        self.director_props_changed |= edits_catalog;
+                        effects.push(done("world", "改动已保存".into()));
+                    }
                     Err(aborted) => {
-                        self.director_props_changed = false;
+                        retract(&mut effects);
                         effects.push(failed(
                             "world",
                             DirectorErrorKind::World,
@@ -94,7 +125,7 @@ impl Runtime {
     /// 读工具的事实只进入本轮的题面和给玩家的回答，不写存档。
     fn director_read(&self, name: &str, args: &Value) -> Result<DirectorEffect, DirectorEffect> {
         let text = match name {
-            "look" => "重新查看了世界".into(),
+            "look" => crate::conductor::context::world_view(self),
             "survey" => crate::conductor::context::survey(self),
             "watch" => crate::conductor::context::watch(self, args),
             "inspect" => crate::conductor::context::inspect(self, args)?,
@@ -106,7 +137,7 @@ impl Runtime {
         Ok(done(name, text))
     }
 
-    fn director_change(
+    pub(super) fn director_change(
         &mut self,
         name: &str,
         args: &Value,
@@ -121,22 +152,7 @@ impl Runtime {
                     .map_err(|e| kernel_error(name, e))?;
                 ok(format!("通知了：{}", short(&text)))
             }
-            "schedule" => {
-                let text = text_arg(args, "text")?;
-                let minutes = args["after_minutes"]
-                    .as_f64()
-                    .ok_or_else(|| bad("after_minutes 须是数字"))?;
-                let locale = optional_arg(args, "locale");
-                let at = self
-                    .world
-                    .director_schedule(&text, minutes, locale.as_deref())
-                    .map_err(|e| kernel_error(name, e))?;
-                ok(format!(
-                    "{} 会通知：{}",
-                    kernel::clock_string(at),
-                    short(&text)
-                ))
-            }
+            "schedule" => self.director_schedule_action(args),
             "place_prop" => {
                 let definition = text_arg(args, "definition")?;
                 let locale = text_arg(args, "locale")?;
@@ -190,7 +206,14 @@ impl Runtime {
                 let board = text_arg(args, "board")?;
                 let title = text_arg(args, "title")?;
                 let text = text_arg(args, "text")?;
-                let id = format!("user:director-{}", self.director.state.next_round);
+                let mut suffix = 1;
+                let id = loop {
+                    let id = format!("user:director-{}-{suffix}", self.director.state.next_round);
+                    if !self.world.contents().documents.contains_key(&id) {
+                        break id;
+                    }
+                    suffix += 1;
+                };
                 self.world
                     .create_content(
                         id,
@@ -223,9 +246,15 @@ impl Runtime {
                     ),
                     None => None,
                 };
+                let revision = self
+                    .world
+                    .weather()
+                    .expect("上面已确认天气可用")
+                    .view
+                    .revision;
                 let request = kernel::weather::WeatherRequest {
-                    request_id: format!("director-{}", self.director.state.next_round),
-                    expected_revision: 0,
+                    request_id: format!("director-{}-{revision}", self.director.state.next_round),
+                    expected_revision: revision,
                     mode,
                     kind,
                 };
@@ -247,6 +276,16 @@ impl Runtime {
                 return id;
             }
             n += 1;
+        }
+    }
+}
+
+fn retract(effects: &mut [DirectorEffect]) {
+    for effect in effects {
+        if effect.ok && !super::is_read(&effect.tool) {
+            effect.ok = false;
+            effect.error_kind = Some(DirectorErrorKind::Rejected);
+            effect.text = format!("已撤回：{}", effect.text);
         }
     }
 }

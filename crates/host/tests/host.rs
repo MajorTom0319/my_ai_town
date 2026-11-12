@@ -5,6 +5,7 @@ mod support;
 mod avatar;
 mod commands;
 mod content;
+mod director;
 mod persistence;
 mod population;
 mod possession;

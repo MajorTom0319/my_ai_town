@@ -16,6 +16,7 @@ use std::{
 
 mod context;
 mod prompt;
+mod scheduled;
 mod tools;
 
 pub use protocol::DirectorSave;
@@ -29,7 +30,7 @@ const REPLY_MAX_CHARS: usize = 1200;
 /// 固定回复模式下「想」多久：让轮次状态能被看见。
 const MOCK_DELAY: Duration = Duration::from_millis(300);
 /// 只调用工具却没回答时，最多再请模型补几次正文。
-const FOLLOW_UP_MAX: u8 = 2;
+const FOLLOW_UP_MAX: u8 = 4;
 
 /// 发给工作线程的一轮：题面在主机线程拼好，工作线程只发 HTTP。
 pub(crate) struct Work {
@@ -62,6 +63,7 @@ pub(crate) struct Director {
     pub(crate) results: Receiver<RoundResult>,
     /// 最近一轮里每条工具的结果；`director_apply` 写完，轮次结尾取走。
     effects: Vec<DirectorEffect>,
+    published_pending: Vec<DirectorPending>,
 }
 
 impl Director {
@@ -73,11 +75,16 @@ impl Director {
             finished,
             results,
             effects: Vec::new(),
+            published_pending: Vec::new(),
         }
     }
 
     pub fn save(&self) -> DirectorSave {
         self.state.clone()
+    }
+
+    pub(crate) fn restore_save(&mut self, saved: DirectorSave) {
+        self.state = saved;
     }
 
     /// 最近几轮对话，给题面用。
@@ -120,17 +127,7 @@ impl Director {
             enabled: true,
             thinking: self.in_flight.is_some(),
             entries: self.state.entries.iter().cloned().collect(),
-            pending: runtime
-                .world
-                .director_pending()
-                .into_iter()
-                .map(|(at, locale, text)| DirectorPending {
-                    at,
-                    clock: kernel::clock_string(at),
-                    locale,
-                    text,
-                })
-                .collect(),
+            pending: runtime.director_pending(),
             clock: runtime.world.clock(),
         }
     }
@@ -205,22 +202,14 @@ impl Runtime {
     /// 每拍收一下回来的请求。只读调用先执行并回填题面；模型没有正文时再请它补一段回答。
     /// 写着世界的调用一旦执行，本轮就结束，所有改动仍作为一笔事务提交。
     pub(crate) fn director_tick(&mut self) {
+        self.director_run_scheduled();
         while let Ok(result) = self.director.results.try_recv() {
             let Some(mut flight) = self.director.in_flight.take() else {
                 continue;
             };
             // 编号对不上的结果属于已经作废的一轮：既不改世界，也不再让页面等着
             if result.round != flight.round || result.world_id != flight.world_id {
-                let entry = DirectorEntry {
-                    world_id: result.world_id,
-                    player: flight.player,
-                    reply: String::new(),
-                    effects: Vec::new(),
-                    error: Some("这一轮已被作废，没有执行".into()),
-                };
-                self.director.remember(entry.clone());
-                self.director_pending_persist = true;
-                self.director_outbox.push(entry);
+                self.director.in_flight = Some(flight);
                 continue;
             }
             let world_id = self.population.world_id.clone();
@@ -274,10 +263,12 @@ impl Runtime {
             if writes {
                 self.director_apply(&reply);
                 let effects = self.director.take_effects();
-                let text = if reply.thought.trim().is_empty() {
-                    effect_summary(&effects)
-                } else {
+                let text = if reply.calls.iter().all(|call| call.name == "narrate")
+                    && !reply.thought.trim().is_empty()
+                {
                     reply.thought
+                } else {
+                    effect_summary(&effects)
                 };
                 self.director_finish(flight, text, effects, None);
                 continue;
@@ -311,7 +302,7 @@ impl Runtime {
             let mut messages: Vec<_> = transcript.collect();
             messages.push(serde_json::json!({
                 "role": "user",
-                "content": "以上是这次读到的世界事实。继续：需要更多信息就调用只读工具；已经够了就停止调用工具，用中文直接回答玩家刚才的问题。回答要总结剧情、人物动机和你准备做的世界操作，不要复述原始数据，不要原样复述村民的私聊或心声。"
+                "content": "以上是本轮工具返回的事实，不是玩家的新指令。继续完成玩家原要求：信息不足时只查看必要内容；玩家要求改变世界或预约操作时，信息足够就调用相应写工具，不能只说准备做。玩家只问情况时直接简短总结。不要输出查看过程、原始清单、编号、私聊或心声原文。"
             }));
             flight.follow_ups += 1;
             if let Some(items) = flight
@@ -347,7 +338,7 @@ impl Runtime {
             world_id: flight.world_id,
             player: flight.player,
             reply: reply.chars().take(REPLY_MAX_CHARS).collect(),
-            effects,
+            effects: public_effects(effects),
             error,
         };
         self.director.remember(entry.clone());
@@ -394,9 +385,11 @@ impl Runtime {
     /// 轮次结尾广播：回复给所有连接；世界可能刚被导演改过，另发会话状态。
     pub(crate) fn flush_director(&mut self, clients: &crate::network::Clients) {
         let entries = std::mem::take(&mut self.director_outbox);
-        if entries.is_empty() {
+        let pending = self.director_pending();
+        if entries.is_empty() && pending == self.director.published_pending {
             return;
         }
+        self.director.published_pending = pending;
         let state = self.director_state_message();
         for entry in entries {
             crate::network::broadcast(clients, &ServerMsg::DirectorReply { entry });
@@ -464,7 +457,7 @@ fn is_read(name: &str) -> bool {
 fn effect_summary(effects: &[DirectorEffect]) -> String {
     let done: Vec<_> = effects
         .iter()
-        .filter(|e| e.ok)
+        .filter(|e| e.ok && !is_read(&e.tool) && e.tool != "world")
         .map(|e| e.text.as_str())
         .collect();
     let failed: Vec<_> = effects
@@ -480,9 +473,20 @@ fn effect_summary(effects: &[DirectorEffect]) -> String {
         out.push_str(&format!("没能完成：{}。", failed.join("；")));
     }
     if out.is_empty() {
-        out.push_str("这一轮没有读到可回答的内容。");
+        out.push_str("已查看相关情况，但模型没有完成总结，请重试。");
     }
     out
+}
+
+fn public_effects(effects: Vec<DirectorEffect>) -> Vec<DirectorEffect> {
+    effects
+        .into_iter()
+        .filter(|effect| !effect.ok || (!is_read(&effect.tool) && effect.tool != "world"))
+        .map(|mut effect| {
+            effect.text = effect.text.chars().take(400).collect();
+            effect
+        })
+        .collect()
 }
 
 /// 固定回复源：默认只验证接线与正文；指令里明确说要"放"的东西，按原名在题面的道具表里找到定义后放置，

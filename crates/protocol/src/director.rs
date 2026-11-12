@@ -84,4 +84,15 @@ pub struct DirectorSave {
     pub summary: String,
     #[serde(default)]
     pub next_round: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled: Vec<DirectorScheduled>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectorScheduled {
+    pub at: f64,
+    pub text: String,
+    pub tool: String,
+    pub arguments: serde_json::Value,
 }

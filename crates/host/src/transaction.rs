@@ -13,6 +13,7 @@ struct Checkpoint {
     avatar_control: Control,
     world_settings: WorldSettings,
     speed: f64,
+    director: protocol::DirectorSave,
 }
 
 /// 事务没有提交的原因。
@@ -94,6 +95,7 @@ impl Runtime {
             avatar_control: self.avatar_control.clone(),
             world_settings: self.world_settings.clone(),
             speed: self.speed,
+            director: self.director.save(),
         }
     }
 
@@ -107,6 +109,7 @@ impl Runtime {
         self.avatar_control = before.avatar_control;
         self.world_settings = before.world_settings;
         self.speed = before.speed;
+        self.director.restore_save(before.director);
         leftovers
     }
 }

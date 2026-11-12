@@ -22,8 +22,9 @@ pub(crate) fn world_view(runtime: &Runtime) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "时钟：{}，节奏 {}{}",
+        "时钟：{}，绝对模拟分钟 {}，节奏 {}{}",
         world.clock(),
+        world.minutes(),
         runtime.speed,
         if runtime.speed > 0.0 {
             ""
@@ -140,16 +141,16 @@ pub(crate) fn world_view(runtime: &Runtime) -> String {
         let _ = writeln!(out, "（道具库是空的，只能贴公告、发通知、预约事件）");
     }
 
-    let pending = world.director_pending();
+    let pending = runtime.director_pending();
     if !pending.is_empty() {
         let _ = writeln!(out, "\n待触发的事：");
-        for (at, locale, text) in pending {
+        for item in pending {
             let _ = writeln!(
                 out,
                 "- {} · {} · {}",
-                kernel::clock_string(at),
-                world.topo.locale_name(&locale),
-                text
+                item.clock,
+                world.topo.locale_name(&item.locale),
+                item.text
             );
         }
     }

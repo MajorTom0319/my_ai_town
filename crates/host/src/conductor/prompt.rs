@@ -21,7 +21,8 @@ const RULES: &str = "\
 所有改动都只是提议，由世界内核校验后才会生效；道具只能投放道具库里已有的定义，不能凭空造新道具。
 道具可用名字，但同名有歧义或名字不在库里时按定义编号来；地点用下面列出的地点编号。
 每次最多调 4 个改变世界的工具。已经明确的操作直接做；玩家问“最近怎么样”“总结剧情”“谁在做什么”时，先用一个或多个只读工具看世界，再用正文回答。
-最终回答必须有正文，简短、具体：说明你看到了什么、判断了什么；若有操作，再说明做了什么、为什么，不要复述数据。只调用工具而不给正文，玩家就看不到你的回应。";
+预约改天气、摆道具或贴公告时，必须调用 schedule 并给 action 和 arguments；只填 text 的预约仅会发通知，不会把描述变成实际世界操作。预约以模拟时间为准，暂停时不计时；用 after_minutes 表示从现在起几分钟，或 at_minutes 表示世界的绝对分钟数。不要先执行再预约，也不要承诺未被工具确认的结果。
+最终回答直接回应玩家，通常 1–3 句；只有玩家明确要求详细回顾时才展开。不要逐项汇报查看过程、复述清单、工具名、内部编号、私聊或心声原文。写操作的实际结果以工具回执为准，失败或撤回不能说成功。";
 
 pub(crate) fn request_body(runtime: &Runtime, text: &str, model: String) -> Value {
     let mut messages = vec![json!({"role": "system", "content": RULES})];
@@ -35,6 +36,9 @@ pub(crate) fn request_body(runtime: &Runtime, text: &str, model: String) -> Valu
         messages.push(json!({"role": "user", "content": entry.player}));
         let mut reply = entry.reply.clone();
         for effect in &entry.effects {
+            if effect.ok && super::is_read(&effect.tool) {
+                continue;
+            }
             reply.push_str(&format!(
                 "\n- {}：{}",
                 if effect.ok { "已做" } else { "未做" },
@@ -67,7 +71,7 @@ pub(crate) fn request_body(runtime: &Runtime, text: &str, model: String) -> Valu
     }));
     json!({
         "model": model,
-        "max_tokens": 1500,
+        "max_tokens": 2200,
         "messages": messages,
         "tools": tools(),
         "tool_choice": "auto",
@@ -88,6 +92,9 @@ pub(crate) fn fold(summary: &mut String, entry: &DirectorEntry) {
         summary.push_str(&format!("\n导演：{}", entry.reply));
     }
     for effect in &entry.effects {
+        if effect.ok && super::is_read(&effect.tool) {
+            continue;
+        }
         summary.push_str(&format!(
             "\n- {}：{}",
             if effect.ok { "已做" } else { "未做" },
@@ -150,20 +157,23 @@ fn tools() -> Vec<Value> {
         }}),
         json!({"type":"function","function":{
             "name":"announce",
-            "description":"马上告诉村民一件事。给了地点就只告诉那里的村民。",
+            "description":"马上告诉某个地点的在场村民一件事；不能用文字假装天气或道具已经改变。",
             "parameters":{"type":"object","properties":{
                 "text":{"type":"string","description":"通知正文，1–800 字"},
-                "locale":{"type":"string","description":"地点编号；不给就通知全镇在场村民"}
+                "locale":{"type":"string","description":"地点编号；不给就通知入口地点的在场村民"}
             },"required":["text"],"additionalProperties":false}
         }}),
         json!({"type":"function","function":{
             "name":"schedule",
-            "description":"预约之后发生一件事：到点才通知。",
+            "description":"预约模拟时间到点后的操作。真实改天气、投放或移除道具、贴公告须提供 action 和 arguments；只给 text 时仅发送通知。到点重新校验并执行，不依赖再次调用模型。暂停时不计时。",
             "parameters":{"type":"object","properties":{
-                "text":{"type":"string","description":"通知正文，1–800 字"},
+                "text":{"type":"string","description":"事项摘要；未指定 action 时作为通知正文，1–800 字"},
                 "after_minutes":{"type":"number","description":"多少模拟分钟后触发，1 到 10080"},
-                "locale":{"type":"string","description":"地点编号；不给就通知全镇"}
-            },"required":["text","after_minutes"],"additionalProperties":false}
+                "at_minutes":{"type":"number","description":"世界绝对分钟数；与 after_minutes 二选一，须在当前模拟时间之后"},
+                "locale":{"type":"string","description":"通知地点编号；不给就通知入口地点。操作地点请写在 arguments 内"},
+                "action":{"type":"string","enum":["announce","set_weather","place_prop","remove_prop","post_bulletin"],"description":"到点执行的操作工具名"},
+                "arguments":{"type":"object","description":"与 action 对应工具相同的参数。例如预约下雨：action=set_weather，arguments={mode:fixed,kind:rain}"}
+            },"required":["text"],"additionalProperties":false}
         }}),
         json!({"type":"function","function":{
             "name":"place_prop",

@@ -135,6 +135,7 @@ fn restore(store: &mut Option<SaveStore>, world: &mut World) -> Result<Saved, Ho
     if let Some(restored) = store.restore_bundle(world)? {
         saved.speed = Some(restored.speed);
         saved.agent = restored.agent;
+        saved.director = restored.director;
         saved.population = Some(restored.population.unwrap_or_else(|| {
             startup::migrate_population(
                 world,

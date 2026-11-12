@@ -185,7 +185,8 @@ impl Runtime {
             },
             ClientMsg::Content { request_id, .. }
             | ClientMsg::RemoveProp { request_id, .. }
-            | ClientMsg::PlaceProp { request_id, .. } => ServerMsg::PropResult {
+            | ClientMsg::PlaceProp { request_id, .. }
+            | ClientMsg::SetPropSupply { request_id, .. } => ServerMsg::PropResult {
                 request_id: request_id.clone(),
                 ok: false,
                 message,
@@ -358,6 +359,13 @@ impl Runtime {
                 near,
                 ..
             } => self.place_prop(request_id, instance, near),
+            SetPropSupply {
+                request_id,
+                prop,
+                action,
+                remaining,
+                ..
+            } => self.set_prop_supply(request_id, &prop, &action, remaining),
             GetPlacementGrid { request_id, .. } => self.placement_grid(request_id),
             PreviewPlacement {
                 request_id,
@@ -575,11 +583,12 @@ impl Runtime {
             && !self.driver.runtime.nobody_can_think(&self.world);
         self.pace = if running { self.next_pace() } else { 0.0 };
         let events = if running {
-            self.world.step(0.1 * self.pace)
+            self.world.step(self.director_step_minutes(0.1 * self.pace))
         } else {
             Vec::new()
         };
         self.note_director_events(events);
+        self.director_run_scheduled();
         let replied = match self.driver.receive(&mut self.world, clients) {
             Ok(replied) => replied,
             Err(error) => {
@@ -786,6 +795,7 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::SetGameMode { world_id, .. }
         | ClientMsg::RemoveProp { world_id, .. }
         | ClientMsg::PlaceProp { world_id, .. }
+        | ClientMsg::SetPropSupply { world_id, .. }
         | ClientMsg::GetPlacementGrid { world_id, .. }
         | ClientMsg::PreviewPlacement { world_id, .. }
         | ClientMsg::DirectorSay { world_id, .. }
@@ -836,6 +846,7 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         ClientMsg::SetWeather { .. }
         | ClientMsg::RemoveProp { .. }
         | ClientMsg::PlaceProp { .. }
+        | ClientMsg::SetPropSupply { .. }
         | ClientMsg::JoinResident { .. }
         | ClientMsg::SetResidentAppearance { .. }
         | ClientMsg::SetResidentBody { .. } => true,

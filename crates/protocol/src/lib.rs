@@ -54,7 +54,8 @@ pub use content::{
     ContentCommand, ContentDetail, ContentKind, ContentMetadata, ContentOrigin, ContentText,
 };
 pub use director::{
-    DirectorEffect, DirectorEntry, DirectorErrorKind, DirectorPending, DirectorSave, DirectorState,
+    DirectorEffect, DirectorEntry, DirectorErrorKind, DirectorPending, DirectorSave,
+    DirectorScheduled, DirectorState,
 };
 pub use interactions::{
     Gesture, Interaction, InteractionCommand, InteractionKind, InteractionStatus,
