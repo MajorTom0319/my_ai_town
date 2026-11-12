@@ -33,6 +33,81 @@ fn bounded(q: &AgentRequest, r: &ResidentRuntime) {
 }
 
 #[test]
+fn saved_notice_backlog_fits_without_losing_originals_or_distinct_notices() {
+    let mut world = world();
+    let runtime = runtime(&mut world, spacious());
+    world.step(5.0);
+    let mut snapshot = serde_json::to_value(world.snapshot()).unwrap();
+    let events = snapshot["actors"]["r1"]["journal"]["events"]
+        .as_array_mut()
+        .unwrap();
+    let first = events
+        .last()
+        .and_then(|event| event["event_id"].as_u64())
+        .unwrap_or(0)
+        + 1;
+    for index in 0..315 {
+        let at = 420.0 + index as f64 / 100.0;
+        events.push(json!({"event_id":first + index,"at":at,"kind":"notice","text":format!("{} 夜间行动还有一个多小时结束：还没有提交睡觉、偷公仓、偷别人家或守家；不提交就本夜没有行动。", kernel::clock_string(at)),"objects":[],"action_id":null}));
+    }
+    for index in 0..80 {
+        events.push(json!({"event_id":first + 315 + index,"at":424.0,"kind":"notice","text":format!("不同的重要通知{index}：{}", "必须保留的具体事实。".repeat(12)),"objects":[],"action_id":null}));
+    }
+    world
+        .restore_snapshot(serde_json::from_value(snapshot).unwrap())
+        .unwrap();
+    let originals = world.actor("r1").unwrap().journal.events.clone();
+    let mut saved = serde_json::to_value(runtime.state()).unwrap();
+    saved["sessions"]["r1"]["paused"] =
+        json!("最小必要上下文仍需约 28095 token，可用输入额度 25600");
+    saved["sessions"]["r1"]["pause_kind"] = json!("fault");
+    saved["sessions"]["r1"]["daily"]["calls"] = json!(7);
+    saved["sessions"]["r1"]["daily"]["tokens"] = json!(100_000);
+    let mut runtime =
+        ResidentRuntime::restore(serde_json::from_value(saved).unwrap(), &world).unwrap();
+    assert_eq!(runtime.resume(&world), 1);
+    assert_eq!(runtime.session("r1").unwrap().daily.tokens, 100_000);
+    let request = request(&mut runtime, &mut world);
+    bounded(&request, &runtime);
+    let body: Value = serde_json::from_str(&request.messages.last().unwrap().content).unwrap();
+    let observation = &body["observation"];
+    let source = observation["events_source"]["context_source"]
+        .as_u64()
+        .unwrap();
+    let full = &runtime.session("r1").unwrap().input.sources[&source];
+    let notices = full.as_array().unwrap();
+    let merged = notices
+        .iter()
+        .find(|event| event["repeat_count"] == 315)
+        .unwrap();
+    let originals_source = merged["context_source"].as_u64().unwrap();
+    assert_eq!(
+        runtime.session("r1").unwrap().input.sources[&originals_source]
+            .as_array()
+            .unwrap()
+            .len(),
+        395
+    );
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|event| event["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("不同的重要通知")))
+            .count(),
+        80
+    );
+    assert_eq!(
+        request.stamp.seen_cursor,
+        originals.last().unwrap().event_id
+    );
+    assert_eq!(world.actor("r1").unwrap().journal.events, originals);
+    assert!(runtime.session("r1").unwrap().pause_reason().is_none());
+    reply(&mut runtime, &mut world, &request, "observe", json!({}));
+    assert_eq!(runtime.session("r1").unwrap().daily.calls, 8);
+}
+
+#[test]
 fn oversized_results_and_old_rounds_preserve_goals_sources_and_restart_continuity() {
     growing_map_and_active_chat_keep_bounded_views_and_a_stable_prefix();
     let mut w = world();

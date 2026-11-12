@@ -3,10 +3,163 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { registerHooks } from 'node:module'
 import { createManager } from '../town-manager.mjs'
 import { worldQuery } from '../towns/hosts.mjs'
 import { APPEARANCE_SET } from '../mapgen/budget.mjs'
 import { position } from '../../frontend/town-shared/src/spatial.ts'
+
+test('survival10 personas, worldview and furnishings survive opening, reload and reset', async () => {
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.includes('/src/prefabs/') && specifier.startsWith('.'))
+        return nextResolve(
+          new URL(specifier === '.' ? './index.ts' : `${specifier}.ts`, context.parentURL).href,
+          context
+        )
+      return nextResolve(specifier, context)
+    },
+  })
+  let prefab
+  try {
+    prefab = (await import('../../frontend/town-shared/src/prefabs/index.ts')).prefabOf(
+      'survival10'
+    )
+  } finally {
+    hooks.deregister()
+  }
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-survival10-setup-'))
+  let manager
+  try {
+    const started = await startTown(root, prefab.spec.places, prefab.spec)
+    manager = started.m
+    let town = started.town
+    const query = (command, type) => worldQuery(town.endpoint, command, (msg) => msg.type === type)
+    for (const reset of [false, true]) {
+      if (reset) await query({ type: 'reset_world', request_id: 'reset' }, 'world_reset')
+      const world = (await query({ type: 'get_world_settings' }, 'world_settings')).state
+      if (world.worldview !== prefab.worldview) {
+        const reply = await query(
+          {
+            type: 'set_worldview',
+            request_id: 'setup',
+            world_id: world.world_id,
+            expected_revision: world.revision,
+            text: prefab.worldview,
+          },
+          'world_settings_saved'
+        )
+        assert.ok(reply.ok, reply.message)
+      }
+      for (const id of prefab.furnish.remove) {
+        const reply = await query(
+          { type: 'remove_prop', request_id: id, world_id: world.world_id, id },
+          'prop_result'
+        )
+        assert.ok(reply.ok, reply.message)
+      }
+      for (const instance of prefab.furnish.place) {
+        const reply = await query(
+          { type: 'place_prop', request_id: instance.id, world_id: world.world_id, instance },
+          'prop_result'
+        )
+        assert.ok(reply.ok, reply.message)
+      }
+      for (const supply of prefab.furnish.giveItem) {
+        const reply = await query(
+          {
+            type: 'set_prop_supply',
+            request_id: 'supply',
+            world_id: world.world_id,
+            prop: supply.id,
+            action: supply.action,
+            remaining: supply.remaining,
+          },
+          'prop_result'
+        )
+        assert.ok(reply.ok, reply.message)
+      }
+      for (const [index, persona] of prefab.cast.entries()) {
+        const template = prefab.roster[index]
+        const preview = (
+          await query(
+            { type: 'preview_resident_join', template_id: template, name: persona.name },
+            'join_preview'
+          )
+        ).preview
+        assert.ok(preview.ok, preview.problems?.join('；'))
+        const joined = await query(
+          {
+            type: 'join_resident',
+            op_id: `cast-${reset}-${index}`,
+            world_id: world.world_id,
+            template_id: template,
+            template_version: preview.template_version,
+            name: preview.name,
+            home: preview.home,
+            persona,
+          },
+          'resident_joined'
+        )
+        assert.ok(joined.outcome.ok, joined.outcome.message)
+      }
+      const mode = await query(
+        {
+          type: 'set_game_mode',
+          request_id: 'mode',
+          world_id: world.world_id,
+          game_mode: prefab.gameMode,
+        },
+        'world_settings_saved'
+      )
+      assert.ok(mode.ok, mode.message)
+      await manager.hosts.close(town.id)
+      const saved = JSON.parse(
+        await fs.readFile(path.join(root, 'towns', town.id, 'world.json'), 'utf8')
+      )
+      assert.equal(saved.world_settings.worldview, prefab.worldview)
+      assert.equal(Object.keys(saved.population.residents).length, 7)
+      for (const resident of Object.values(saved.population.residents)) {
+        const persona = prefab.cast.find((candidate) => candidate.name === resident.name)
+        assert.ok(persona, resident.name)
+        assert.ok(resident.persona.includes(persona.personality))
+        assert.ok(resident.persona.includes(persona.drives))
+        assert.ok(persona.drives.startsWith('最高目标是自己保持参赛资格，活到第十天终局'))
+        const session = saved.resident_agent.runtime.sessions[resident.id]
+        assert.equal(session.instructions, `${resident.persona}\n${prefab.worldview}`)
+        assert.equal(session.daily.calls, 0)
+      }
+      town = await manager.hosts.open(town.id)
+      const population = (await query({ type: 'get_population' }, 'population')).population
+      for (const resident of population.residents) {
+        const config = await query(
+          { type: 'get_agent_config', resident: resident.id },
+          'agent_config'
+        )
+        assert.equal(config.persona, saved.population.residents[resident.id].persona)
+      }
+      const catalog = (await query({ type: 'get_props' }, 'props')).catalog
+      assert.equal(catalog.instances.filter((prop) => prop.name === '单人床').length, 7)
+      assert.ok(!catalog.instances.some((prop) => ['干粮袋', '饮用水桶'].includes(prop.name)))
+      const pantries = catalog.instances.filter((prop) => prop.name === '私粮袋')
+      assert.equal(pantries.length, 7)
+      assert.ok(
+        pantries.every(
+          (prop) =>
+            prop.storage_slots === 0 && prop.actions.every((action) => action.remaining === 0)
+        )
+      )
+      for (const instance of prefab.furnish.place)
+        assert.ok(
+          catalog.instances.some((placed) => placed.id === instance.id),
+          instance.id
+        )
+    }
+  } finally {
+    await manager?.stop()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
 
 test('residents at runtime prop stations remain visible and possessable after removal and reload', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-runtime-station-'))

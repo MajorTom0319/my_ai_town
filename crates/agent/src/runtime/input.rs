@@ -168,7 +168,16 @@ impl ResidentRuntime {
                 + wire_bytes(std::slice::from_ref(&attempt.user.0));
             let room = goal.saturating_sub(estimate_tokens(fixed, self.state.bytes_per_token));
             if !self.shrink_context(world, s, &mut fit, room, estimated)? {
-                return Err(AgentError::Context(format!("最小必要上下文仍需约 {estimated} token，可用输入额度 {}；请检查模型窗口与居民设定，当前事务和原文已保留", lines.budget)));
+                let system_tokens = estimate_tokens(
+                    wire_bytes(std::slice::from_ref(&system)),
+                    self.state.bytes_per_token,
+                );
+                let tool_tokens = estimate_tokens(tools_bytes, self.state.bytes_per_token);
+                let current_tokens = estimate_tokens(
+                    wire_bytes(std::slice::from_ref(&attempt.user.0)),
+                    self.state.bytes_per_token,
+                );
+                return Err(AgentError::Context(format!("上下文窗口不足（不是花费额度用尽）：最小必要上下文仍需约 {estimated} token，可用输入额度 {}；规则与人设约 {system_tokens}、工具约 {tool_tokens}、当前状态约 {current_tokens} token。请检查过大的输入或模型窗口，当前事务和原文已保留", lines.budget)));
             }
         }
     }

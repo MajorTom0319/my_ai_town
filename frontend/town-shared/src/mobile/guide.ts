@@ -30,7 +30,7 @@ import {
   progressText,
 } from '../models/builtin'
 import { isCompact } from '../platform'
-import { BUILTIN, PRESETS, type ProviderPreset } from '../providers'
+import { BUILTIN, PRESETS, modelOptions, type ProviderPreset } from '../providers'
 import { peopleCount, PICKS, recommendReason, roomLeft } from '../residents/recommend'
 import type { Receipt, SaveCommand } from '../connection'
 import type { ShellPanel } from '../shell/panel'
@@ -572,6 +572,20 @@ export function createGuide(d: GuideDeps) {
         : reuse
           ? `都用 ${reuse.name} · ${reuse.model}，以后可以给每个人单独换。`
           : `都用 ${preset.name} · ${preset.defaultModel}，以后可以给每个人单独换。`
+    const options =
+      !skipModel && !mock() ? modelOptions({ active: residentModel(), providers }) : []
+    const choose = el('select')
+    choose.setAttribute('aria-label', '居民用的模型')
+    options.forEach((option, index) =>
+      choose.append(new Option(`${option.name} · ${option.model}`, String(index)))
+    )
+    choose.onchange = () => {
+      const option = options[Number(choose.value)]
+      if (!option) return
+      fromSaved = false
+      reuse = option
+      render()
+    }
     // 还是默认的那几位时说明为什么推荐他们
     const chosen = picks.map((id) => free.find((t) => t.template_id === id))
     const defaults =
@@ -603,6 +617,7 @@ export function createGuide(d: GuideDeps) {
       el('h2', '请几位居民住进来'),
       el('p', why),
       el('p', using, 'guide-note guide-using'),
+      ...(options.length > 1 ? [choose] : []),
       ...wishPart,
       free.length ? grid : el('p', '正在读取村民库…', 'dim'),
       el(

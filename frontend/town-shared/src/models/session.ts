@@ -4,21 +4,18 @@
 import type { Receipt, SaveCommand } from '../connection'
 import { newId } from '../ids'
 import type { ClientMsg, ModelChoice, ServerMsg } from '../protocol'
-import { PRESETS } from '../providers'
+import { PRESETS, modelOptions, type ProviderModelOption } from '../providers'
 import type { ShellPanel } from '../shell/panel'
 import {
   connectModel,
   hasModel,
-  usableProvider,
   type ConnectResult,
   type ModelConfig,
   type ModelTransport,
 } from './connect'
 
 /** 一个能用的模型：服务、模型名和给玩家看的服务名 */
-export interface ModelOption extends ModelChoice {
-  name: string
-}
+export type ModelOption = ProviderModelOption
 
 type Waiter = { match: (m: ServerMsg) => unknown; resolve: (v: unknown) => void }
 
@@ -91,20 +88,8 @@ export function createModelSession(deps: {
 
   const providerName = (id: string) =>
     config?.providers.find((p) => p.id === id)?.name || PRESETS.find((p) => p.id === id)?.name || id
-  /** 能用的模型：设定里选的那个排第一，其余每个能用的服务各出它的默认模型 */
   function options(): ModelOption[] {
-    if (!config) return []
-    const list: ModelOption[] = []
-    const active = config.active
-    const usable = config.providers.filter(usableProvider)
-    if (active && usable.some((p) => p.id === active.provider))
-      list.push({ ...active, name: providerName(active.provider) })
-    for (const p of usable) {
-      const model = PRESETS.find((x) => x.id === p.id)?.defaultModel
-      if (model && !list.some((o) => o.provider === p.id))
-        list.push({ provider: p.id, model, name: providerName(p.id) })
-    }
-    return list
+    return modelOptions(config)
   }
 
   /** 还没选模型的村民都用这个（默认是 `options` 的第一个）；单独选过的不动。所有人一起问、一起设 */

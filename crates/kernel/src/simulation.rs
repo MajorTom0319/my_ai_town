@@ -55,13 +55,16 @@ impl World {
             // 带路人走完这一段后，跟随的人沿他的足迹跟上。
             self.advance_walks(step);
             self.advance_weather();
-            self.advance_game_mode();
+            // 玩法要在从事现场动作完成的那一刻读写粮食、目击和守家，所以先让完成落到世界里，
+            // 再调用玩法结算；恋爱、发生等新动作仍留到这一片之后。完成后没有排下一项的零时长
+            // 空等活动，不能被当成一次新的取粮。
             for id in completed {
-                // 第一名参与者完成会同时释放双方；第二名不能再结算已释放的空等。
                 if self.actors[&id].current.remaining(self.minutes).is_some() {
                     self.complete_current(&id, self.minutes);
                 }
             }
+            self.advance_game_mode();
+            self.settle_instant_actions(&ids);
             self.fire_happenings();
             self.notice_bodies();
             self.notice_losses();
@@ -144,6 +147,18 @@ impl World {
             // 停下等回应的人也不接着开始下一项，免得刚好动身离开
             if self.held_for_player(id, self.minutes) {
                 continue;
+            }
+            let actor = &self.actors[id];
+            if actor.present()
+                && !actor.player_controlled()
+                && actor.possession.is_none()
+                && !actor.needs.incapacitated()
+                && actor.free_walk.is_none()
+                && actor.current.is_idle()
+                && actor.current.action.is_none()
+                && !actor.plan.is_empty()
+            {
+                self.start_next(id, self.minutes);
             }
             for guard in 0..=INSTANT_GUARD {
                 if self.actors[id]
@@ -281,7 +296,19 @@ impl World {
             self.log(info, log);
             changes.push(text);
         } else if !self.actors[id].current.is_instant() {
-            changes.push(self.record_receipt(id, now)?);
+            let spot = crate::physiology::body_spot(self, &self.actors[id]).cloned();
+            let mode_changes = match spot {
+                Some(spot) => self.game_mode_complete_prop_action(id, &spot)?,
+                None => None,
+            };
+            if let Some(mode_changes) = mode_changes {
+                for text in &mode_changes {
+                    self.actor_mut(id).journal.record(now, text.clone());
+                }
+                changes.extend(mode_changes);
+            } else {
+                changes.push(self.record_receipt(id, now)?);
+            }
         }
         if changes.is_empty() && was_goto {
             changes.push(crate::outcome::stayed(
@@ -385,7 +412,21 @@ impl World {
                 return self.fail_start(id, now, &intent, binding, reason.to_string());
             }
         }
-        let nominal_minutes = spot.map(|s| s.minutes);
+        let mut nominal_minutes = spot.map(|s| s.minutes);
+        if let Some(spot) = spot.cloned() {
+            match self.game_mode_start_prop_action(id, &spot) {
+                Ok(Some(minutes)) => {
+                    nominal_minutes = Some(minutes);
+                    if let Intent::Do { cond, .. } = &mut intent {
+                        *cond = Some(crate::intent::StopCond::Duration(minutes));
+                    }
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    return self.fail_start(id, now, &intent, binding, reason.to_string())
+                }
+            }
+        }
         let result = self.actors.get_mut(id).expect("村民存在").start_activity(
             &self.topo,
             now,

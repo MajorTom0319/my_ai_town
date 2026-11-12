@@ -121,6 +121,25 @@ impl Runtime {
         self.prop_reply_saying(request_id, result, done)
     }
 
+    /// 把一件带有限补给的道具设成指定余量；勉强算一件道具改动，和放置一样存档、回 PropResult。
+    pub(crate) fn set_prop_supply(
+        &mut self,
+        request_id: String,
+        prop: &str,
+        action: &str,
+        remaining: u32,
+    ) -> Outcome {
+        let result = self
+            .transact(|rt| rt.world.set_map_supply(Some(prop), "", action, remaining))
+            .map_err(|aborted| aborted.to_string())
+            .and_then(|found| {
+                found
+                    .map(|_| PropPreview::Done {})
+                    .ok_or_else(|| format!("{prop} 没有可改余量的动作 {action}"))
+            });
+        self.prop_reply_saying(request_id, result, String::new())
+    }
+
     pub(crate) fn place_prop(
         &mut self,
         request_id: String,

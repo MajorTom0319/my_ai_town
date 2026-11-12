@@ -104,4 +104,56 @@ impl World {
         self.topo.bump_navigation_revision();
         Ok(())
     }
+
+    /// 玩法把镇上一件带有限补给的道具设成指定余量（公共粮仓的米数）。
+    /// 先按实例编号找，找不到再按地点里第一个带这个动作、还在地图上的道具找；
+    /// 普通补给不能超过初始量；玩法管理的展示量以账本为准。返回设好之后的道具编号。
+    pub fn set_map_supply(
+        &mut self,
+        instance: Option<&str>,
+        locale: &str,
+        action: &str,
+        remaining: u32,
+    ) -> Result<Option<String>> {
+        let find = |p: &&crate::topology::Prop| {
+            p.verbs
+                .iter()
+                .filter_map(|v| v.action.as_ref())
+                .any(|a| a.id == action && a.supply.is_some())
+        };
+        let prop = match instance {
+            Some(id) => self.topo.prop(id).filter(find).map(|p| p.id.clone()),
+            None => self
+                .topo
+                .props()
+                .iter()
+                .filter(|p| p.locale == locale)
+                .filter(find)
+                .find(|p| !p.withdrawn && self.inventory.on_map(&self.props, &p.id))
+                .map(|p| p.id.clone()),
+        };
+        let Some(id) = prop else {
+            return Ok(None);
+        };
+        let Some(act) = self.topo.prop(&id).and_then(|p| {
+            p.verbs
+                .iter()
+                .filter_map(|v| v.action.as_ref())
+                .find(|a| a.id == action)
+                .cloned()
+        }) else {
+            return Ok(None);
+        };
+        let value = if act.mode_managed {
+            remaining
+        } else {
+            remaining.min(act.supply.as_ref().map_or(remaining, |s| s.initial))
+        };
+        if self.props.supply_remaining(&id, &act) == Some(value) {
+            return Ok(Some(id));
+        }
+        self.props.set_supply(&id, action, value);
+        self.inventory.bump();
+        Ok(Some(id))
+    }
 }

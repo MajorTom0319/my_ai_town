@@ -186,6 +186,7 @@ fn check_prop_action<'a>(
         let recipient = draft.and_then(|d| d.recipient.as_deref());
         crate::physiology::check_body_use(w, actor, locale, &spot.prop, action, recipient)?;
     }
+    w.game_mode_check_prop_action(actor, spot)?;
     Ok(spot)
 }
 

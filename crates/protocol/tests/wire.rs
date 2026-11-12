@@ -106,6 +106,7 @@ fn client_variants() -> Vec<String> {
         PlaceProp,
         GetPlacementGrid,
         PreviewPlacement,
+        SetPropSupply,
         SetSpeed,
         GetModelConfig,
         SetModelConfig,

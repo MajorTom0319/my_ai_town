@@ -2,6 +2,7 @@ import type { GameModeId, GameModeView } from '../../protocol'
 import type { StingId } from '../catalog'
 import type { MusicCell } from '../scene'
 import { swordholderMusic } from './swordholder'
+import { survival10Music } from './survival10'
 import { tideMusic } from './tide'
 import { werewolfMusic } from './werewolf'
 
@@ -30,4 +31,5 @@ export const GAME_MODE_MUSIC: { [K in GameModeId]: GameModeMusic<K> } = {
   tide: tideMusic,
   werewolf: werewolfMusic,
   swordholder: swordholderMusic,
+  survival10: survival10Music,
 }

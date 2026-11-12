@@ -1750,6 +1750,13 @@ pub fn client_samples() -> Vec<ClientMsg> {
                 position: [12.5, 8.],
             }),
         },
+        ClientMsg::SetPropSupply {
+            request_id: "r7b".into(),
+            world_id: "w1".into(),
+            prop: "granary".into(),
+            action: "take".into(),
+            remaining: 21,
+        },
         ClientMsg::GetPlacementGrid {
             request_id: "r8".into(),
             world_id: "w1".into(),

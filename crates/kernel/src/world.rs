@@ -117,6 +117,12 @@ impl World {
     }
 
     /// 按编号取可变人物。编号来自 actors 表或已校验的命令，不存在即内核不变式被破坏。
+    /// 测试用：换一个人的所在地点（真实地图里靠走路到达）。
+    #[doc(hidden)]
+    pub fn actor_for_test(&mut self, id: &str) -> &mut Actor {
+        self.actor_mut(id)
+    }
+
     pub(crate) fn actor_mut(&mut self, id: &str) -> &mut Actor {
         self.actors
             .get_mut(id)

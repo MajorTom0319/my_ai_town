@@ -116,6 +116,7 @@ fn prop_view(world: &World, actor: &str, p: &kernel::topology::Prop) -> Value {
     let verbs: Vec<_> = p
         .verbs
         .iter()
+        .filter(|verb| !verb.action.as_ref().is_some_and(|action| action.mode_managed))
         .map(|v| {
             json!({
                 "verb": v.verb,
@@ -309,7 +310,21 @@ pub fn observe(world: &World, actor: &str, after: u64) -> Result<(Value, u64), A
         .props()
         .iter()
         .filter(|p| p.locale == a.locus.locale && !p.withdrawn && world.sees_prop(actor, &p.id))
-        .map(|p| prop_view(world, actor, p))
+        .map(|p| {
+            let mut view = prop_view(world, actor, p);
+            // 玩法账本管理的道具不开放通用动作，但补给余量是公开可见的；只附数字，不替人执行动作。
+            // 只有玩法账本道具带这一项，普通补给和没开玩法的观察与以前一字不差。
+            let supply = p
+                .verbs
+                .iter()
+                .filter_map(|v| v.action.as_ref())
+                .filter(|v| v.mode_managed && v.supply.is_some())
+                .find_map(|v| world.props().supply_remaining(&p.id, v));
+            if let Some(remaining) = supply {
+                view["ledger"] = json!(remaining);
+            }
+            view
+        })
         .collect();
     let remaining = match &a.current.kind {
         ActKind::Travel { journey, .. } => format!(

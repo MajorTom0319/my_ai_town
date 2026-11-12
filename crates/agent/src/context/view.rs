@@ -66,6 +66,7 @@ fn visible_props(state: &mut InputState, view: &mut Value, bytes: usize) {
 
 pub(crate) fn observation(s: &mut Session, raw: &Value, bytes: usize) -> (Value, u64) {
     let mut view = raw.clone();
+    merge_notices(&mut s.input, &mut view);
     // 这些集合可按需查询，不能让它们挤掉本人状态与正在进行的互动。背包不在其中：一堆只列一件，
     // 最多 8 格，总是放得下；截成开头一段，后面的急救包、水就看不见了（大逃杀第三局）。
     visible_props(&mut s.input, &mut view, bytes / 8);
@@ -117,11 +118,72 @@ pub(crate) fn observation(s: &mut Session, raw: &Value, bytes: usize) -> (Value,
     // （见 observation::observe）。游标照样到最新，丢掉的不再补看。
     let dropped = keep_recent_events(&mut view["events"], bytes / 3);
     crate::observation::note_earlier(&mut view, dropped);
+    recent_field(&mut s.input, &mut view, "events", bytes / 3);
     let cursor = raw["event_cursor"]
         .as_u64()
         .unwrap_or(s.cursors.acknowledged);
     view["event_cursor"] = json!(cursor);
     (view, cursor)
+}
+
+fn merge_notices(state: &mut InputState, view: &mut Value) {
+    let Some(events) = view["events"].as_array_mut() else {
+        return;
+    };
+    let original = events.clone();
+    let mut previous = None;
+    let mut merged: Vec<Value> = Vec::new();
+    for event in events.drain(..) {
+        let key = if event["kind"] == "notice"
+            && event["text"]
+                .as_str()
+                .is_some_and(|text| text.chars().count() < crate::observation::EVENT_TEXT_CHARS)
+        {
+            event["at"].as_f64().map(|at| {
+                let text = event["text"].as_str().unwrap_or_default();
+                let text = text
+                    .split_once(' ')
+                    .and_then(|(day, rest)| {
+                        let (clock, body) = rest.split_once(' ')?;
+                        let minutes = kernel::calendar::parse_clock(&format!("{day} {clock}"))?;
+                        ((at - minutes).abs() <= 1.1).then_some(body)
+                    })
+                    .unwrap_or(text);
+                let mut identity = event.clone();
+                let fields = identity.as_object_mut().expect("事件是对象");
+                fields.remove("event_id");
+                fields.remove("at");
+                fields.insert("text".into(), json!(text));
+                (kernel::calendar::day_index(at), identity.to_string())
+            })
+        } else {
+            None
+        };
+        if key.is_some() && key == previous {
+            let last = merged.last_mut().expect("相同通知已有首条");
+            let count = last["repeat_count"].as_u64().unwrap_or(1) + 1;
+            let first = last
+                .get("first_minutes")
+                .cloned()
+                .unwrap_or_else(|| last["at"].clone());
+            *last = event;
+            last["repeat_count"] = json!(count);
+            last["first_minutes"] = first;
+        } else {
+            merged.push(event);
+        }
+        previous = key;
+    }
+    if merged.len() < original.len() {
+        let source = state.source(&json!(original));
+        for event in &mut merged {
+            if event.get("repeat_count").is_some() {
+                event["context_source"] = json!(source);
+            }
+        }
+        view["events_source"] = json!({"context_source":source,"repeated_notices_merged":true});
+    }
+    view["events"] = json!(merged);
 }
 
 /// 事件从最早的丢起，直到放得下；最新一条和通知不丢。返回丢掉的（时刻，是不是交谈），按时间先后。

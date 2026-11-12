@@ -7,16 +7,38 @@ use kernel::{
 };
 use protocol::{
     FactKind, GameModeAction, GameModeChoice, GameModeContext, GameModeView, GroupStatus,
-    PhysiologySwitches, SwordholderEnding, SwordholderPhase, SwordholderRole, SwordholderView,
-    TideCircle, TideFlare, TideNewsKind, TidePhase, TideView, WerewolfOut, WerewolfPhase,
-    WerewolfRole, WerewolfSide, WerewolfView,
+    PhysiologySwitches, Survival10Phase, Survival10View, SwordholderEnding, SwordholderPhase,
+    SwordholderRole, SwordholderView, TideCircle, TideFlare, TideNewsKind, TidePhase, TideView,
+    WerewolfOut, WerewolfPhase, WerewolfRole, WerewolfSide, WerewolfView,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
+fn walk(w: &mut World, id: &str, key: &str, locale: &str) {
+    common::run(
+        w,
+        id,
+        key,
+        json!({"intent": {"verb": "前往", "locale": locale}}),
+    )
+    .unwrap();
+    common::finish(w, id, key);
+}
+
+fn notes(w: &World, id: &str) -> Vec<String> {
+    w.actor(id)
+        .unwrap()
+        .journal
+        .events_after(0)
+        .iter()
+        .map(|e| e.text.clone())
+        .collect()
+}
+
 const HOUR: f64 = 60.0;
 const DAY: f64 = 1440.0;
 const GOAL: [f64; 2] = [24.0, 18.0];
+const COLLECT_MINUTES: f64 = 5.5;
 
 /// 一座圆岛：最高处在 (24, 18)，离它约 14.6 米以外是海。甲站在最高处，乙站在离它 12 米的东岸。
 fn island() -> World {
@@ -1082,4 +1104,1271 @@ fn swordholder_night_elects_hands_over_and_ends_when_the_switch_is_pressed() {
 #[test]
 fn swordholder_night_fails_when_the_swordholder_never_presses() {
     play_swordholder(false);
+}
+
+fn survival10(w: &World) -> Survival10View {
+    match w.game_mode_view() {
+        Some(GameModeView::Survival10(v)) => v,
+        other => panic!("开着的该是聪明人小镇：{other:?}"),
+    }
+}
+
+/// 聪明人小镇的回合流程：固定七人、白天提交窗口、悄悄话每天一条、偶数天会议与第十天陪审团。
+/// 预置十日口粮，不替人物做真实劳动和取粮；资源结算由下面的真实移动测试覆盖。
+#[test]
+fn survival10_runs_ten_days_through_the_jury() {
+    let ids: Vec<String> = (0..7).map(|n| format!("s{n}")).collect();
+    let people: Vec<(&str, &str, &str)> = ids
+        .iter()
+        .enumerate()
+        .map(|(n, id)| {
+            (
+                id.as_str(),
+                ["甲", "乙", "丙", "丁", "戊", "己", "庚"][n],
+                "loc_a",
+            )
+        })
+        .collect();
+    let mut w = common::world_with(common::tiny_topology(), 7.0 * HOUR, &people);
+    place_survival10_farms(&mut w, "loc_a");
+    w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(4) }))
+        .unwrap();
+    w.test_move_granary("loc_a");
+    w.set_physiology(PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    for id in &ids {
+        w.test_give_rice(id, 10);
+    }
+    // 六个人不够：固定七位，宁可拒绝也不拿半个阵容开一局
+    let mut few = common::world_with(common::tiny_topology(), 7.0 * HOUR, &people[..6]);
+    assert!(few
+        .set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(4) }))
+        .is_err());
+    assert!(few.game_mode().is_none());
+
+    let conserved = |w: &World| {
+        let v = survival10(w);
+        v.public_rice + v.seats.iter().map(|s| s.rice).sum::<u32>()
+    };
+    assert_eq!(survival10(&w).phase, Survival10Phase::Waiting);
+    w.step(HOUR);
+    assert_eq!(survival10(&w).phase, Survival10Phase::Day);
+    w.step(30.0);
+    assert_eq!(
+        survival10(&w).phase,
+        Survival10Phase::Day,
+        "白天窗口太短，模型来不及提交"
+    );
+
+    let mut whispered = false;
+    let mut jury_seen = false;
+    let mut day10_vote_seen = false;
+    let mut previous = survival10(&w);
+    let mut remaining = 91;
+    let mut meetings = Vec::new();
+    for _ in 0..20000 {
+        let v = survival10(&w);
+        if previous.phase == Survival10Phase::Day && v.phase != Survival10Phase::Day {
+            remaining -= previous
+                .seats
+                .iter()
+                .filter(|seat| seat.out.is_none())
+                .count() as u32;
+        }
+        if v.phase == Survival10Phase::Speech && previous.phase != Survival10Phase::Speech {
+            meetings.push(v.day);
+        }
+        previous = v.clone();
+        assert_eq!(conserved(&w), remaining, "每天只能在晚餐时消耗一次口粮");
+        if v.phase == Survival10Phase::Over {
+            break;
+        }
+        if v.phase == Survival10Phase::Jury {
+            jury_seen = true;
+        }
+        if v.day == 10 && v.phase == Survival10Phase::Vote {
+            day10_vote_seen = true;
+        }
+        let mut acted = false;
+        for id in &ids {
+            let Some(GameModeContext::Survival10(c)) = w.game_mode_context(id) else {
+                continue;
+            };
+            if v.seats
+                .iter()
+                .find(|seat| &seat.id == id)
+                .unwrap()
+                .out
+                .is_none()
+            {
+                assert!(c.goal.contains("自己保持参赛资格，活到第十天终局"));
+            } else {
+                assert!(c.goal.contains("你已出局，自己的生存目标未完成"));
+            }
+            let Some(first) = c.actions.first().map(String::as_str) else {
+                continue;
+            };
+            acted = true;
+            match first {
+                "work" | "take_rice" => {
+                    mode_act(&mut w, id, first, None, None);
+                }
+                "whisper" => {
+                    if v.day == 1 && !whispered {
+                        whispered = true;
+                        mode_act(&mut w, id, "whisper", Some(2), Some("今晚别睡太沉。"));
+                        let again = GameModeAction {
+                            action: "whisper".into(),
+                            target: Some(3.to_string()),
+                            text: Some("再说一遍".into()),
+                            reason: None,
+                        };
+                        assert!(w.game_mode_act(id, &again).is_err(), "一天只能发一条悄悄话");
+                    }
+                }
+                "speak" => mode_act(&mut w, id, "speak", None, Some("我先说说粮食的账。")),
+                "vote" | "jury_vote" => {
+                    let target = v
+                        .seats
+                        .iter()
+                        .find(|s| s.out.is_none() && &s.id != id)
+                        .map(|s| s.seat)
+                        .expect("总有人可投");
+                    mode_act(&mut w, id, first, Some(target), None);
+                }
+                // 不交睡觉、守家或偷粮：没完成动作的登记不会产生任何结果。
+                _ => mode_act(&mut w, id, first, None, None),
+            }
+        }
+        if acted {
+            w.step(1.0);
+        } else {
+            let step = w.quiet_minutes(|_| Some(10.0)).unwrap_or(10.0).min(60.0);
+            w.step(step);
+        }
+    }
+    let v = survival10(&w);
+    assert_eq!(v.phase, Survival10Phase::Over);
+    assert_eq!(v.day, 10);
+    assert_eq!(meetings, vec![2, 4, 6, 8, 10]);
+    assert!(jury_seen);
+    assert!(day10_vote_seen, "第十天不能跳过第五次篝火投票");
+    assert!(v.winner.is_some(), "十日实验必须有人或明说无人获胜");
+    let ended_at = w.minutes();
+    w.step(HOUR);
+    assert_eq!(w.minutes(), ended_at + HOUR);
+    w.set_game_mode(None).unwrap();
+}
+
+#[test]
+fn survival10_dinner_is_private_and_hunger_counts_evenings_not_mornings() {
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    world.test_give_rice(&ids[0], 3);
+    world.test_give_rice(&ids[1], 1);
+    world.step(11.0 * HOUR);
+    let dinner = survival10(&world);
+    assert_eq!(dinner.phase, Survival10Phase::Night);
+    assert_eq!(dinner.seats[0].rice, 2);
+    assert_eq!(dinner.seats[1].rice, 0);
+    assert_eq!(dinner.seats[2].hungry_streak, 1);
+    assert!(dinner.seats.iter().all(|seat| seat.out.is_none()));
+    assert!(notes(&world, &ids[0])
+        .iter()
+        .any(|text| text.contains("晚餐消耗1袋米，剩余2袋")));
+    world.step(14.0 * HOUR);
+    let morning = survival10(&world);
+    assert_eq!((morning.day, morning.phase), (2, Survival10Phase::Day));
+    assert_eq!(morning.seats, dinner.seats);
+    assert!(!morning.history.iter().any(|text| text.contains("剩余2袋")));
+    assert!(!notes(&world, &ids[1])
+        .iter()
+        .any(|text| text.contains("剩余2袋")));
+    world.step(10.0 * HOUR);
+    let next_dinner = survival10(&world);
+    assert_eq!(next_dinner.seats[0].rice, 1);
+    assert_eq!(next_dinner.seats[1].hungry_streak, 1);
+    assert!(next_dinner.seats[1].out.is_none());
+    assert!(next_dinner.seats[2..].iter().all(|seat| {
+        seat.hungry_streak == 2 && seat.out.as_deref() == Some("连续两晚未进食")
+    }));
+}
+
+/// 测试地图没有粮仓地点：大家在甲地，粮仓也摆在甲地，玩法的粮仓位置用测试钩子指到甲地。
+fn survival10_world(start: f64) -> (World, Vec<String>) {
+    let ids: Vec<String> = (0..7).map(|n| format!("h{n}")).collect();
+    let people: Vec<(&str, &str, &str)> = ids
+        .iter()
+        .enumerate()
+        .map(|(n, id)| {
+            (
+                id.as_str(),
+                ["甲", "乙", "丙", "丁", "戊", "己", "庚"][n],
+                "loc_a",
+            )
+        })
+        .collect();
+    let mut w = common::world_with(common::tiny_topology(), start, &people);
+    // 只测玩法的粮食：关掉通用生理，免得渴、累这些把人和比赛用的米搅在一起
+    w.set_physiology(PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    w.place_prop(kernel::props::Placement {
+        instance: kernel::props::Instance {
+            id: "granary".into(),
+            definition: "core:public-granary@2".into(),
+            locale: "loc_a".into(),
+            name: None,
+            board: None,
+        },
+        definition: kernel::props::Catalog::from_json(include_str!(
+            "../../../data/props/core/definitions.json"
+        ))
+        .unwrap()
+        .latest("core:public-granary")
+        .unwrap()
+        .clone(),
+    })
+    .unwrap();
+    w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(3) }))
+        .unwrap();
+    w.test_move_granary("loc_a");
+    (w, ids)
+}
+
+fn granary_on_map(w: &World) -> u32 {
+    let found: Option<u32> = w
+        .prop_views()
+        .into_iter()
+        .find(|p| p.name == "公共粮仓")
+        .and_then(|p| {
+            p.actions.iter().find_map(|a| match a {
+                protocol::PropActionEntry::Defined(v) => v.remaining.flatten(),
+                protocol::PropActionEntry::Legacy(_) => None,
+            })
+        });
+    found.expect("粮仓没余量")
+}
+
+/// 甲、乙是出发点，每人一处住宅，公仓和初始落脚在丙地，田在乙地。
+fn survival10_real_topology() -> kernel::Topology {
+    common::topology(&common::two_places_json(|data| {
+        data["locales"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "loc_c", "name": "粮仓广场", "kind": "dwell"}));
+        for index in 1..=7 {
+            let id = format!("test_{index}");
+            let node = format!("n_home_{index}");
+            let name = format!("{index}号住宅");
+            data["locales"].as_array_mut().unwrap().push(json!({
+                "id": id, "name": name, "kind": "dwell"
+            }));
+            data["stations"].as_array_mut().unwrap().push(json!({
+                "id": format!("st_{index}"), "locale": id, "name": name,
+                "kind": "arrival", "node": node
+            }));
+            data["places"].as_array_mut().unwrap().push(json!({
+                "name": name, "locale": id, "arrival_station": format!("st_{index}"),
+                "type": "tiny", "summary": ""
+            }));
+            data["passages"].as_array_mut().unwrap().push(json!({
+                "id": format!("p_{index}"), "a": "loc_c", "b": id,
+                "node_a": "n_c", "node_b": node, "minutes": 0.0, "capabilities": ["通行"]
+            }));
+        }
+        data["entry"] = json!({"locale": "loc_c", "station": "st_c"});
+        data["navigation"] = json!(null);
+        data["precise_navigation"] = json!(false);
+        data["places"].as_array_mut().unwrap().push(json!({
+            "name": "路东空地", "locale": "loc_c", "arrival_station": "st_a",
+            "type": "tiny", "summary": ""
+        }));
+        data["stations"].as_array_mut().unwrap().push(json!({
+            "id": "st_c", "locale": "loc_c", "name": "粮仓广场", "kind": "arrival", "node": "n_c"
+        }));
+        let mut props = data["props"].as_array().unwrap().clone();
+        props.push(json!({
+            "id": "test:farm", "name": "田地", "locale": "loc_b",
+            "verbs": [{"verb": "下地干活", "duration_minutes": 120.0,
+                       "effects": {"累": 1.0}}]
+        }));
+        props.push(json!({
+            "id": "test:bed", "name": "单人床", "locale": "test_1",
+            "verbs": [{"verb": "睡觉", "duration_minutes": 480.0,
+                       "completion": "sleep"}]
+        }));
+        data["props"] = json!(props);
+    }))
+}
+
+fn place_survival10_real_props(w: &mut World, with_bed: bool) {
+    place_survival10_farms(w, "loc_b");
+    let catalog = kernel::props::Catalog::from_json(include_str!(
+        "../../../data/props/core/definitions.json"
+    ))
+    .unwrap();
+    let mut props = vec![("granary", "core:public-granary", "loc_c")];
+    let homes = (1..=7).map(|n| format!("test_{n}")).collect::<Vec<_>>();
+    for (index, home) in homes.iter().enumerate() {
+        props.push((
+            format!("user:s10-home_pantry_v2_{}", index + 1).leak(),
+            "core:private-ration-sack",
+            home,
+        ));
+    }
+    if with_bed {
+        for (index, home) in homes.iter().enumerate() {
+            props.push((format!("bed_{}", index + 1).leak(), "core:bed", home));
+        }
+    }
+    for (id, definition, locale) in props {
+        w.place_prop(kernel::props::Placement {
+            instance: kernel::props::Instance {
+                id: id.into(),
+                definition: format!(
+                    "{definition}@{}",
+                    catalog.latest(definition).unwrap().version
+                ),
+                locale: locale.into(),
+                name: None,
+                board: None,
+            },
+            definition: catalog.latest(definition).unwrap().clone(),
+        })
+        .unwrap();
+    }
+}
+
+fn place_survival10_farms(w: &mut World, locale: &str) {
+    let catalog = kernel::props::Catalog::from_json(include_str!(
+        "../../../data/props/core/definitions.json"
+    ))
+    .unwrap();
+    for number in 1..=4 {
+        w.place_prop(kernel::props::Placement {
+            instance: kernel::props::Instance {
+                id: format!("user:s10-farm-v2_{number}"),
+                definition: "core:survival10-farm@2".into(),
+                locale: locale.into(),
+                name: Some(format!("公共农田{number}号田块")),
+                board: None,
+            },
+            definition: catalog.latest("core:survival10-farm").unwrap().clone(),
+        })
+        .unwrap();
+    }
+}
+
+fn survival10_night_world(seed: u32) -> (World, Vec<String>) {
+    let ids: Vec<String> = (0..7).map(|n| format!("h{n}")).collect();
+    let people: Vec<(&str, &str, &str)> = ids
+        .iter()
+        .map(|id| (id.as_str(), id.as_str(), "loc_c"))
+        .collect();
+    let mut w = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    w.set_physiology(PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    place_survival10_real_props(&mut w, true);
+    w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(seed) }))
+        .unwrap();
+    w.test_move_granary("loc_c");
+    w.step(HOUR);
+    while survival10(&w).phase != Survival10Phase::Night {
+        w.step(30.0);
+    }
+    (w, ids)
+}
+
+fn survival10_act(
+    w: &mut World,
+    id: &str,
+    action: &str,
+    target: Option<&str>,
+) -> Result<String, kernel::KernelError> {
+    w.game_mode_act(
+        id,
+        &GameModeAction {
+            action: action.into(),
+            target: target.map(str::to_owned),
+            text: None,
+            reason: None,
+        },
+    )
+}
+
+#[test]
+fn survival10_night_reminder_is_once_per_night_across_reload_and_legacy_saves() {
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    world.step(HOUR);
+    while survival10(&world).phase != Survival10Phase::Night {
+        world.step(30.0);
+    }
+    for id in &ids {
+        world.test_give_rice(id, 10);
+    }
+    survival10_act(&mut world, &ids[0], "guard_home", None).unwrap();
+    let until = survival10(&world).until.unwrap();
+    world.step(until - world.minutes() - 60.0);
+    for _ in 0..20 {
+        world.step(0.1);
+    }
+    let reminders = |world: &World, id: &str| {
+        notes(world, id)
+            .into_iter()
+            .filter(|text| text.contains("还没有提交睡觉、偷公仓、偷别人家或守家"))
+            .count()
+    };
+    assert_eq!(reminders(&world, &ids[0]), 0);
+    assert_eq!(reminders(&world, &ids[1]), 1);
+    let saved = serde_json::to_value(world.snapshot()).unwrap();
+    world
+        .restore_snapshot(serde_json::from_value(saved.clone()).unwrap())
+        .unwrap();
+    world.step(1.0);
+    assert_eq!(reminders(&world, &ids[1]), 1);
+    let mut legacy = saved;
+    legacy["game_mode"]["survival10"]
+        .as_object_mut()
+        .unwrap()
+        .remove("night_reminded");
+    for event in legacy["actors"][&ids[1]]["journal"]["events"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if let Some(text) = event["text"].as_str() {
+            event["text"] =
+                json!(text.replace("夜间行动将在一小时内结束", "夜间行动还有一个多小时结束"));
+        }
+    }
+    world
+        .restore_snapshot(serde_json::from_value(legacy).unwrap())
+        .unwrap();
+    let before = world.actor(&ids[1]).unwrap().journal.events.clone();
+    world.step(1.0);
+    assert_eq!(world.actor(&ids[1]).unwrap().journal.events, before);
+    assert_eq!(reminders(&world, &ids[1]), 1);
+    world.step(until - world.minutes());
+    while survival10(&world).phase != Survival10Phase::Night {
+        world.step(30.0);
+    }
+    let until = survival10(&world).until.unwrap();
+    world.step(until - world.minutes() - 59.0);
+    assert_eq!(reminders(&world, &ids[1]), 2);
+}
+
+/// 公共粮仓是地图上的实体：开局 21 袋，玩法的米数每次变动都写回袋子。
+#[test]
+fn survival10_granary_on_the_map_tracks_rice() {
+    let (mut w, ids) = survival10_world(7.0 * HOUR);
+    w.place_prop(kernel::props::Placement {
+        instance: kernel::props::Instance {
+            id: "user:s10-home_pantry_v2_1".into(),
+            definition: "core:private-ration-sack@2".into(),
+            locale: "loc_a".into(),
+            name: None,
+            board: None,
+        },
+        definition: kernel::props::Catalog::from_json(include_str!(
+            "../../../data/props/core/definitions.json"
+        ))
+        .unwrap()
+        .latest("core:private-ration-sack")
+        .unwrap()
+        .clone(),
+    })
+    .unwrap();
+    assert_eq!(granary_on_map(&w), 21);
+    w.step(HOUR);
+    assert_eq!(survival10(&w).phase, Survival10Phase::Day);
+    assert!(common::run(
+        &mut w,
+        &ids[0],
+        "unregistered-take",
+        json!({
+            "intent": {"verb": "取粮", "locale": "loc_a"}, "prop_id": "granary"
+        })
+    )
+    .is_err());
+    // 站在粮仓的人能领
+    assert!(survival10_act(&mut w, &ids[0], "take_rice", None).is_ok());
+    let pantry = w
+        .prop_views()
+        .into_iter()
+        .find(|prop| prop.id == "user:s10-home_pantry_v2_1")
+        .unwrap();
+    assert!(pantry.actions.iter().any(|action| matches!(
+        action,
+        protocol::PropActionEntry::Defined(view) if view.remaining == Some(Some(0))
+    )));
+    assert!(w.affordances.for_prop("granary", "take").is_none());
+    assert!(w.affordances.for_prop("granary", "取粮").is_some());
+    assert!(w
+        .affordances
+        .for_prop("user:s10-home_pantry_v2_1", "ledger")
+        .is_none());
+    assert!(w
+        .affordances
+        .for_prop("user:s10-home_pantry_v2_1", "取粮")
+        .is_some());
+    assert_eq!(w.inventory_view(&ids[0]).used, 0);
+    // 账改小，袋子跟着变
+    w.set_map_supply(Some("granary"), "loc_a", "take", 5)
+        .unwrap();
+    assert_eq!(granary_on_map(&w), 5);
+    w.set_map_supply(Some("granary"), "loc_a", "take", 25)
+        .unwrap();
+    assert_eq!(granary_on_map(&w), 25);
+    w.step(1.0);
+    assert_eq!(granary_on_map(&w), survival10(&w).public_rice);
+    // 换个没有粮仓的地点：找不到就什么也不改
+    assert_eq!(w.set_map_supply(None, "loc_b", "take", 3).unwrap(), None);
+    let revision = w.actor(&ids[0]).unwrap().actions.revision;
+    w.run_actions(
+        &ids[0],
+        "take-and-leave",
+        revision,
+        &[
+            serde_json::from_value(json!({
+                "intent": {"verb": "取粮", "locale": "loc_a"}, "prop_id": "granary"
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({"intent": {"verb": "前往", "locale": "loc_b"}})).unwrap(),
+        ],
+    )
+    .unwrap();
+    w.step(9.0);
+    assert_eq!(survival10(&w).seats[0].rice, 0);
+    assert_eq!(granary_on_map(&w), 21);
+    let (fresh, _) = survival10_world(7.0 * HOUR);
+    w = common::restore(&w, fresh);
+    w.step(1.0);
+    assert_eq!(survival10(&w).seats[0].rice, 1);
+    assert_eq!(granary_on_map(&w), 20);
+    let group = w.action_group(&ids[0], "take-and-leave").unwrap();
+    assert_eq!(group.results[0].status, protocol::ActionStatus::Succeeded);
+    assert!(group.results[0]
+        .changes
+        .iter()
+        .any(|change| change.contains("已取回1袋米")));
+    common::finish(&mut w, &ids[0], "take-and-leave");
+    let actions = w
+        .action_group(&ids[0], "take-and-leave")
+        .unwrap()
+        .actions
+        .clone();
+    let revision = w.actor(&ids[0]).unwrap().actions.revision;
+    assert_eq!(
+        w.run_actions(&ids[0], "take-and-leave", revision, &actions)
+            .unwrap()
+            .status,
+        GroupStatus::Succeeded
+    );
+    assert_eq!(w.actor(&ids[0]).unwrap().locus.locale, "loc_b");
+    assert_eq!(survival10(&w).seats[0].rice, 1);
+    let pantry = w
+        .prop_views()
+        .into_iter()
+        .find(|prop| prop.id == "user:s10-home_pantry_v2_1")
+        .unwrap();
+    assert!(pantry.actions.iter().any(|action| matches!(action,
+        protocol::PropActionEntry::Defined(view) if view.remaining == Some(Some(1))
+    )));
+    let (fresh, _) = survival10_world(7.0 * HOUR);
+    w = common::restore(&w, fresh);
+    walk(&mut w, &ids[0], "back-to-granary", "loc_a");
+    assert!(common::run(
+        &mut w,
+        &ids[0],
+        "repeat-take",
+        json!({
+            "intent": {"verb": "取粮", "locale": "loc_a"}, "prop_id": "granary"
+        })
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("不能重复领取"));
+    assert_eq!(granary_on_map(&w), 20);
+    w.set_game_mode(None).unwrap();
+}
+
+#[test]
+fn survival10_granary_interruption_and_last_bag_do_not_create_claims() {
+    let (mut w, ids) = survival10_world(7.0 * HOUR);
+    w.step(HOUR);
+    survival10_act(&mut w, &ids[0], "take_rice", None).unwrap();
+    common::run(
+        &mut w,
+        &ids[0],
+        "interrupted-take",
+        json!({
+            "intent": {"verb": "collect", "locale": "loc_a"}, "prop_id": "granary"
+        }),
+    )
+    .unwrap();
+    w.step(9.0);
+    w.interrupt_actions(&ids[0], "离开取粮");
+    assert_eq!(
+        w.action_group(&ids[0], "interrupted-take").unwrap().status,
+        GroupStatus::Interrupted
+    );
+    w.step(1.0);
+    assert_eq!(survival10(&w).seats[0].rice, 0);
+    assert_eq!(granary_on_map(&w), 21);
+    let mut save = serde_json::to_value(w.snapshot()).unwrap();
+    save["game_mode"]["survival10"]["public_rice"] = json!(1);
+    w.restore_snapshot(serde_json::from_value(save).unwrap())
+        .unwrap();
+    common::run(&mut w, &ids[0], "retry-take", json!({
+        "intent": {"verb": "collect", "locale": "loc_a", "duration_minutes": 60}, "prop_id": "granary"
+    })).unwrap();
+    survival10_act(&mut w, &ids[1], "take_rice", None).unwrap();
+    common::run(
+        &mut w,
+        &ids[1],
+        "occupied-take",
+        json!({
+            "intent": {"verb": "collect", "locale": "loc_a"}, "prop_id": "granary"
+        }),
+    )
+    .unwrap();
+    w.step(10.0);
+    assert_eq!(
+        w.action_group(&ids[0], "retry-take").unwrap().status,
+        GroupStatus::Succeeded
+    );
+    assert_eq!(
+        w.action_group(&ids[1], "occupied-take").unwrap().status,
+        GroupStatus::Failed
+    );
+    assert_eq!(survival10(&w).seats[0].rice, 1);
+    assert_eq!(survival10(&w).seats[1].rice, 0);
+    assert_eq!(granary_on_map(&w), 0);
+    assert!(common::run(
+        &mut w,
+        &ids[1],
+        "empty-take",
+        json!({
+            "intent": {"verb": "collect", "locale": "loc_a"}, "prop_id": "granary"
+        })
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("已经空了"));
+    let save = serde_json::to_value(w.snapshot()).unwrap();
+    assert_eq!(
+        save["game_mode"]["survival10"]["day_orders"]["1"]["claimed"],
+        json!(false)
+    );
+    assert_eq!(
+        save["game_mode"]["survival10"]["day_orders"]["1"]["collected"],
+        json!(false)
+    );
+    w.step(30.0);
+    assert_eq!(granary_on_map(&w), 0);
+    assert_eq!(survival10(&w).seats[0].rice, 1);
+}
+
+#[test]
+fn survival10_granary_night_collection_only_informs_present_witnesses() {
+    let (mut w, ids) = survival10_world(7.0 * HOUR);
+    w.step(HOUR);
+    while survival10(&w).phase != Survival10Phase::Night {
+        w.step(30.0);
+    }
+    walk(&mut w, &ids[2], "bystander-leaves", "loc_b");
+    survival10_act(&mut w, &ids[0], "steal_public", None).unwrap();
+    common::run(
+        &mut w,
+        &ids[0],
+        "steal-public",
+        json!({
+            "intent": {"verb": "collect", "locale": "loc_a"}, "prop_id": "granary"
+        }),
+    )
+    .unwrap();
+    w.step(9.0);
+    assert_eq!(survival10(&w).seats[0].rice, 0);
+    w.step(1.0);
+    assert_eq!(
+        w.action_group(&ids[0], "steal-public").unwrap().status,
+        GroupStatus::Succeeded
+    );
+    assert_eq!(granary_on_map(&w), 20);
+    assert_eq!(survival10(&w).seats[0].rice, 1);
+    assert!(notes(&w, &ids[1])
+        .iter()
+        .any(|note| note.contains("在公仓取米时")));
+    assert!(!notes(&w, &ids[2])
+        .iter()
+        .any(|note| note.contains("在公仓取米时")));
+    let Some(GameModeContext::Survival10(context)) = w.game_mode_context(&ids[2]) else {
+        panic!("缺少玩法题面")
+    };
+    assert!(!context
+        .known
+        .iter()
+        .chain(&context.history)
+        .any(|note| note.contains("在公仓取米时")));
+    assert!(common::run(
+        &mut w,
+        &ids[0],
+        "repeat-steal",
+        json!({
+            "intent": {"verb": "collect", "locale": "loc_a"}, "prop_id": "granary"
+        })
+    )
+    .is_err());
+    w.step(30.0);
+    assert_eq!(granary_on_map(&w), 20);
+}
+
+/// 夜里进门偷粮：只有真正走到对方住宅、完成入室动作才记账；守家按取粮完成那一刻判断。
+#[test]
+fn survival10_stealing_into_a_home_is_silent_unless_guarded() {
+    let run = |guard: bool, leave: bool| {
+        let (mut w, ids) = survival10_night_world(3);
+        w.test_give_rice(&ids[0], 1);
+        survival10_act(&mut w, &ids[1], "steal_home", Some("1")).unwrap();
+        if guard {
+            survival10_act(&mut w, &ids[0], "guard_home", None).unwrap();
+        }
+        let target_home = w.actor(&ids[0]).unwrap().home.clone().unwrap();
+        walk(&mut w, &ids[1], "steal-goto", &target_home);
+        if leave {
+            walk(&mut w, &ids[0], "guard-leave", "loc_c");
+        }
+        w.step(4.0);
+        assert_eq!(survival10(&w).seats[0].rice, 1, "入室没满五分钟不能偷");
+        w.step(COLLECT_MINUTES);
+        let result = (
+            notes(&w, &ids[1]),
+            notes(&w, &ids[0]),
+            notes(&w, &ids[2]),
+            survival10(&w).seats[0].rice,
+            survival10(&w).seats[1].rice,
+        );
+        while survival10(&w).day < 2 {
+            w.step(30.0);
+        }
+        result
+    };
+    let (thief, victim, bystander, victim_rice, thief_rice) = run(false, false);
+    assert_eq!((victim_rice, thief_rice), (0, 1));
+    assert!(
+        thief
+            .iter()
+            .any(|t| t.contains("从1号h0家的私粮袋取得1袋米")),
+        "{thief:?}"
+    );
+    assert!(victim.iter().any(|t| t.contains("少了1袋")), "{victim:?}");
+    assert!(
+        !victim.iter().any(|t| t.contains("2号h1")),
+        "被偷的人不该知道是谁：{victim:?}"
+    );
+    assert!(
+        !bystander
+            .iter()
+            .any(|t| t.contains("看见") || t.contains("偷")),
+        "{bystander:?}"
+    );
+
+    let (thief, victim, _, victim_rice, thief_rice) = run(true, false);
+    assert_eq!((victim_rice, thief_rice), (1, 0));
+    assert!(
+        thief.iter().any(|t| t.contains("被对方守家阻止")),
+        "{thief:?}"
+    );
+    assert!(
+        victim.iter().any(|t| t.contains("阻止了对方")),
+        "{victim:?}"
+    );
+
+    let (thief, _, _, victim_rice, thief_rice) = run(true, true);
+    assert_eq!((victim_rice, thief_rice), (0, 1), "离开守家后偷窃应成功");
+    assert!(
+        thief
+            .iter()
+            .any(|t| t.contains("从1号h0家的私粮袋取得1袋米")),
+        "{thief:?}"
+    );
+}
+
+/// 白天行动走完整路径：走到田里累计八小时，聊天会停表；领米动作没完成不到账；
+/// 同一机会不能改选。存档重开后劳动分钟和已领取状态都还在。
+#[test]
+fn survival10_day_actions_follow_real_work_and_granary_visits() {
+    let ids: Vec<String> = (0..7).map(|n| format!("h{n}")).collect();
+    let people: Vec<(&str, &str, &str)> = ids
+        .iter()
+        .enumerate()
+        .map(|(n, id)| {
+            let locale: &'static str = ["loc_a", "loc_b", "loc_c"][n % 3];
+            (
+                id.as_str(),
+                ["甲", "乙", "丙", "丁", "戊", "己", "庚"][n],
+                locale,
+            )
+        })
+        .collect();
+    let mut w = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    for (n, (id, _)) in ids.iter().zip(people.iter()).enumerate() {
+        let locale = format!("test_{}", n + 1);
+        w.actor_for_test(id).home = Some(locale.clone());
+    }
+    w.set_physiology(PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    place_survival10_real_props(&mut w, true);
+    w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(5) }))
+        .unwrap();
+    w.step(HOUR);
+    assert_eq!(survival10(&w).phase, Survival10Phase::Day);
+    let answer = survival10_act(&mut w, &ids[1], "work", None).unwrap();
+    assert!(answer.contains("还没增加公仓"), "{answer}");
+    assert!(survival10_act(&mut w, &ids[1], "take_rice", None).is_err());
+
+    // 2 号走到分配的田块，八小时动作中途聊天，回来只需补足剩余时间。
+    walk(&mut w, &ids[1], "farm-goto", "loc_b");
+    let farm = survival10(&w).seats[1].farm.clone().unwrap();
+    common::run(
+        &mut w,
+        &ids[1],
+        "farm-work",
+        json!({
+            "intent": {"verb": "work", "locale": "loc_b"}, "prop_id": farm
+        }),
+    )
+    .unwrap();
+    w.step(4.0 * HOUR);
+    let working = &survival10(&w).seats[1];
+    assert_eq!(working.worked_minutes, 240.0);
+    assert!(
+        (240.0..=241.0).contains(&working.labor_progress),
+        "未到下一分钟结算的劳动也要进入右上角进度：{}",
+        working.labor_progress
+    );
+    assert!(working.working_now, "右上角的劳动进度必须对应当前真实动作");
+    walk(&mut w, &ids[0], "farm-visitor", "loc_b");
+    let invited = w
+        .interact(
+            &ids[0],
+            "farm-work-talk",
+            w.actor(&ids[0]).unwrap().actions.revision,
+            &protocol::InteractionCommand::Offer {
+                partner_id: ids[1].clone(),
+                interaction: protocol::InteractionKind::Talk,
+                message: "还在忙".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        survival10(&w).seats[1].working_now,
+        "收到邀请但还没答应时仍在劳动"
+    );
+    w.step(10.0);
+    let invited_working = &survival10(&w).seats[1];
+    assert!(invited_working.working_now);
+    assert!(
+        (250.0..=251.0).contains(&invited_working.labor_progress),
+        "回应邀请前的真实劳动仍要计入：{}",
+        invited_working.labor_progress
+    );
+    let revision = w.actor(&ids[1]).unwrap().actions.revision;
+    w.interact(
+        &ids[1],
+        "farm-reply",
+        revision,
+        &protocol::InteractionCommand::Reply {
+            interaction_id: invited.id.clone(),
+            accept: true,
+            message: "好".into(),
+        },
+    )
+    .unwrap();
+    w.step(30.0);
+    let talking = &survival10(&w).seats[1];
+    assert_eq!(
+        talking.worked_minutes, 250.0,
+        "答应邀请那一刻起聊天必须停表"
+    );
+    assert_eq!(
+        talking.labor_progress, talking.worked_minutes,
+        "聊天期间界面不能继续涨时间"
+    );
+    assert!(!talking.working_now, "聊天中不能再显示农田劳作中");
+    let mut fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    place_survival10_real_props(&mut fresh, true);
+    w = common::restore(&w, fresh);
+    assert_eq!(survival10(&w).seats[1].farm.as_ref(), Some(&farm));
+    w.step(HOUR);
+    assert_eq!(
+        survival10(&w).seats[1].worked_minutes,
+        240.0,
+        "聊天后还要重新下地"
+    );
+    common::run(
+        &mut w,
+        &ids[1],
+        "farm-resume",
+        json!({
+            "intent": {"verb": "work", "locale": "loc_b"}, "prop_id": farm
+        }),
+    )
+    .unwrap();
+    w.step(4.0 * HOUR - 1.0);
+    assert_eq!(survival10(&w).seats[1].worked_minutes, 479.0);
+    w.step(1.0);
+    assert_eq!(
+        w.action_group(&ids[1], "farm-resume").unwrap().status,
+        GroupStatus::Succeeded
+    );
+    assert_eq!(survival10(&w).seats[1].worked_minutes, 480.0);
+    assert_eq!(survival10(&w).public_rice, 21, "劳动完成也要到晚餐才入账");
+
+    // 1 号只在原地登记工作；3 号登记领米却没有取粮。
+    survival10_act(&mut w, &ids[0], "work", None).unwrap();
+    survival10_act(&mut w, &ids[2], "take_rice", None).unwrap();
+    w.step(30.0);
+    assert_eq!(survival10(&w).seats[0].worked_minutes, 0.0);
+    assert_eq!(survival10(&w).seats[2].rice, 0);
+
+    // 4 号真实走到粮仓，做「取粮」；动作完成那一刻立即到账。
+    walk(&mut w, &ids[3], "take-goto", "loc_c");
+    survival10_act(&mut w, &ids[3], "take_rice", None).unwrap();
+    let public = survival10(&w).public_rice;
+    common::run(
+        &mut w,
+        &ids[3],
+        "take-rice",
+        json!({
+            "intent": {"verb": "取粮", "locale": "loc_c"}, "prop_id": "granary"
+        }),
+    )
+    .unwrap();
+    w.step(9.0);
+    assert_eq!(survival10(&w).seats[3].rice, 0, "取粮还没完成");
+    w.step(2.0);
+    let v = survival10(&w);
+    assert_eq!(v.seats[3].rice, 1, "取粮完成才到账");
+    assert_eq!(v.public_rice, public - 1, "到账同时从公仓扣除");
+
+    while survival10(&w).phase == Survival10Phase::Day {
+        w.step(30.0);
+    }
+    assert_eq!(survival10(&w).produced_today, 1, "只计实际工作满八小时的人");
+    // 存档重开：阶段、劳动和已领取的米仍在。
+    let mut fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    place_survival10_real_props(&mut fresh, true);
+    let restored = common::restore(&w, fresh);
+    let r = survival10(&restored);
+    assert_eq!(r.phase, survival10(&w).phase);
+    assert!(r
+        .seats
+        .iter()
+        .all(|s| s.rice == survival10(&w).seats[s.seat as usize - 1].rice));
+}
+
+#[test]
+fn survival10_guidance_resumes_idle_and_saved_plans_before_real_actions() {
+    let ids: Vec<_> = (0..7).map(|number| format!("guided_{number}")).collect();
+    let locales: Vec<_> = (1..=7).map(|number| format!("test_{number}")).collect();
+    let people: Vec<_> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id.as_str(),
+                id.as_str(),
+                if index == 0 {
+                    "loc_a"
+                } else {
+                    locales[index].as_str()
+                },
+            )
+        })
+        .collect();
+    let mut world = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    place_survival10_real_props(&mut world, true);
+    for (index, id) in ids.iter().enumerate() {
+        world.actor_for_test(id).home = Some(format!("test_{}", index + 1));
+    }
+    world.set_physiology(PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    world
+        .set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(5) }))
+        .unwrap();
+    world.step(HOUR);
+    survival10_act(&mut world, &ids[0], "work", None).unwrap();
+    world.step(10.0);
+    let farmer = world.actor(&ids[0]).unwrap();
+    assert_eq!(farmer.locus.locale, "loc_b");
+    assert!(farmer.plan.is_empty());
+    assert_eq!(farmer.current.verb, "停留");
+    assert_eq!(survival10(&world).seats[0].worked_minutes, 0.0);
+    common::run(
+        &mut world,
+        &ids[0],
+        "real-work",
+        json!({"intent": {"verb": "work"}, "prop_id": "user:s10-farm-v2_1"}),
+    )
+    .unwrap();
+    world.step(60.0);
+    assert_eq!(survival10(&world).seats[0].worked_minutes, 60.0);
+    while survival10(&world).phase != Survival10Phase::Night {
+        world.step(30.0);
+    }
+    survival10_act(&mut world, &ids[1], "sleep", None).unwrap();
+    world.step(10.0);
+    let sleeper = world.actor(&ids[1]).unwrap();
+    let home = sleeper.locus.locale.clone();
+    let idle = sleeper.current.clone();
+    assert!(sleeper.plan.is_empty());
+    assert_eq!(home, "test_2");
+    assert_eq!(sleeper.current.verb, "停留");
+    world
+        .actor_for_test(&ids[1])
+        .plan
+        .push_back(kernel::action_state::QueuedAction::Untracked(
+            kernel::intent::Intent::Goto {
+                locale: home,
+                station: None,
+            },
+        ));
+    world.actor_for_test(&ids[1]).current = idle;
+    let before = survival10(&world);
+    let mut fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    place_survival10_real_props(&mut fresh, true);
+    world = common::restore(&world, fresh);
+    assert_eq!(survival10(&world), before);
+    world.step(1.0);
+    assert!(world.actor(&ids[1]).unwrap().plan.is_empty());
+    common::run(
+        &mut world,
+        &ids[1],
+        "real-sleep",
+        json!({"intent": {"verb": "睡觉"}, "prop_id": "bed_2"}),
+    )
+    .unwrap();
+    world.step(1.0);
+    assert_eq!(world.actor(&ids[1]).unwrap().current.verb, "睡觉");
+    world.step(480.0);
+    assert_eq!(world.actor(&ids[1]).unwrap().current.verb, "停留");
+    assert_eq!(
+        world.action_group(&ids[1], "real-sleep").unwrap().status,
+        GroupStatus::Succeeded
+    );
+}
+
+#[test]
+fn survival10_four_daily_registrations_work_in_parallel_and_survive_reload() {
+    let ids: Vec<_> = (0..7).map(|number| format!("farmer_{number}")).collect();
+    let people: Vec<_> = ids
+        .iter()
+        .map(|id| (id.as_str(), id.as_str(), "loc_b"))
+        .collect();
+    let mut w = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    place_survival10_real_props(&mut w, false);
+    w.set_physiology(PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(5) }))
+        .unwrap();
+    for id in &ids {
+        w.test_give_rice(id, 10);
+    }
+    w.step(HOUR);
+    for id in &ids[..3] {
+        survival10_act(&mut w, id, "work", None).unwrap();
+    }
+    for (index, id) in ids[..4].iter().enumerate() {
+        common::run(
+            &mut w,
+            id,
+            "work",
+            json!({
+                "intent": {"verb": "work", "locale": "loc_b"},
+                "prop_id": format!("user:s10-farm-v2_{}", index + 1)
+            }),
+        )
+        .unwrap();
+    }
+    w.step(2.0 * HOUR);
+    let before = survival10(&w);
+    assert_eq!(before.registered_today, 4);
+    assert!(before.seats[..4]
+        .iter()
+        .all(|seat| seat.worked_minutes == 120.0 && seat.farm.is_some()));
+    let rejected = survival10_act(&mut w, &ids[4], "work", None).unwrap_err();
+    assert!(rejected.to_string().contains("名额已满"), "{rejected}");
+    assert!(common::run(
+        &mut w,
+        &ids[4],
+        "bypass",
+        json!({
+            "intent": {"verb": "work", "locale": "loc_b"}, "prop_id": "user:s10-farm-v2_4"
+        })
+    )
+    .is_err());
+    assert!(common::run(
+        &mut w,
+        &ids[0],
+        "wrong-farm",
+        json!({
+            "intent": {"verb": "work", "locale": "loc_b"}, "prop_id": "user:s10-farm-v2_2"
+        })
+    )
+    .is_err());
+    let mut fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    place_survival10_real_props(&mut fresh, false);
+    w = common::restore(&w, fresh);
+    assert_eq!(survival10(&w), before);
+    w.interrupt_actions(&ids[3], "中途休息");
+    assert!(survival10_act(&mut w, &ids[4], "work", None).is_err());
+    survival10_act(&mut w, &ids[4], "take_rice", None).unwrap();
+    assert!(common::run(
+        &mut w,
+        &ids[4],
+        "take-bypass",
+        json!({
+            "intent": {"verb": "work", "locale": "loc_b"}, "prop_id": "user:s10-farm-v2_4"
+        })
+    )
+    .is_err());
+    common::run(
+        &mut w,
+        &ids[3],
+        "resume",
+        json!({
+            "intent": {"verb": "work", "locale": "loc_b"}, "prop_id": "user:s10-farm-v2_4"
+        }),
+    )
+    .unwrap();
+    w.step(6.0 * HOUR);
+    assert!(survival10(&w).seats[..4]
+        .iter()
+        .all(|seat| seat.worked_minutes == 480.0));
+    assert_eq!(survival10(&w).public_rice, 21);
+    assert!(common::run(
+        &mut w,
+        &ids[0],
+        "repeat-work",
+        json!({
+            "intent": {"verb": "work", "locale": "loc_b"}, "prop_id": "user:s10-farm-v2_1"
+        })
+    )
+    .is_err());
+    while survival10(&w).phase == Survival10Phase::Day {
+        w.step(30.0);
+    }
+    assert_eq!(survival10(&w).produced_today, 4);
+    assert_eq!(survival10(&w).public_rice, 25);
+    w.step(30.0);
+    assert_eq!(survival10(&w).public_rice, 25);
+    while survival10(&w).day < 2 {
+        w.step(30.0);
+    }
+    let next = survival10(&w);
+    assert_eq!(next.registered_today, 0);
+    assert_eq!(next.produced_today, 0);
+    assert!(next
+        .seats
+        .iter()
+        .all(|seat| seat.farm.is_none() && seat.worked_minutes == 0.0));
+    survival10_act(&mut w, &ids[4], "work", None).unwrap();
+    assert_eq!(survival10(&w).registered_today, 1);
+}
+
+/// 夜间目击只看取粮完成那一刻真正在场、醒着的人：两人都取到才互相看见，
+/// 只走了半路的人看不到；不相干的人收到的事只属于自己的经历。
+#[test]
+fn survival10_night_witnesses_only_people_actually_there() {
+    let ids: Vec<String> = (0..7).map(|n| format!("h{n}")).collect();
+    let people: Vec<(&str, &str, &str)> = ids
+        .iter()
+        .map(|id| (id.as_str(), id.as_str(), "loc_c"))
+        .collect();
+    let mut w = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    w.set_physiology(PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    place_survival10_real_props(&mut w, true);
+    w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(7) }))
+        .unwrap();
+    w.test_move_granary("loc_c");
+    w.step(HOUR);
+    while survival10(&w).phase != Survival10Phase::Night {
+        w.step(30.0);
+    }
+    for id in [&ids[0], &ids[1], &ids[2]] {
+        survival10_act(&mut w, id, "steal_public", None).unwrap();
+    }
+    // 1、2 号真的在粮仓取粮；3 号到粮仓后不取。
+    for id in [&ids[0], &ids[1]] {
+        walk(&mut w, id, "night-goto", "loc_c");
+        common::run(
+            &mut w,
+            id,
+            "night-take",
+            json!({
+                "intent": {"verb": "取粮", "locale": "loc_c"}, "prop_id": "granary"
+            }),
+        )
+        .unwrap();
+        w.step(12.0);
+    }
+    walk(&mut w, &ids[2], "night-goto", "loc_c");
+    w.step(30.0);
+    assert!(notes(&w, &ids[0])
+        .iter()
+        .any(|t| t.contains("看见了") && t.contains("2号h1")));
+    assert!(notes(&w, &ids[1])
+        .iter()
+        .any(|t| t.contains("看见了") && t.contains("1号h0")));
+    assert!(
+        !notes(&w, &ids[2]).iter().any(|t| t.contains("看见了")),
+        "{:?}",
+        notes(&w, &ids[2])
+    );
+    assert!(!notes(&w, &ids[3])
+        .iter()
+        .any(|t| t.contains("看见了") || t.contains("公仓取米")));
+
+    // 存档重开不能重新提交当夜的选择，也不能重复取米。
+    let fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    let mut restored = common::restore(&w, fresh);
+    assert!(survival10_act(&mut restored, &ids[1], "steal_public", None).is_err());
+    let rice = survival10(&restored).seats[1].rice;
+    restored.step(60.0);
+    assert_eq!(survival10(&restored).seats[1].rice, rice);
 }

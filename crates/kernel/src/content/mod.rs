@@ -250,6 +250,7 @@ pub fn book_placement(
         description: "阅读完成后可查看正文；是否记忆由阅读者决定".into(),
         actions: vec![Action {
             consumes_item: false,
+            mode_managed: false,
             portion_name: None,
             requires: vec![],
             id: "read".into(),

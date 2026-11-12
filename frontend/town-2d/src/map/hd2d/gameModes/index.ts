@@ -3,6 +3,7 @@ import type { GameModeView } from 'town-shared/protocol'
 import type { MapTheme } from '../../themes/types'
 import type { Badge } from '../villagerSigns'
 import { SwordholderLook } from './swordholder'
+import { Survival10Look } from './survival10'
 import { TideLook } from './tide'
 import { WerewolfLook } from './werewolf'
 
@@ -40,5 +41,5 @@ export interface GameModeLook {
 
 /** 所有玩法的画面，场景建好时装上 */
 export function gameModeLooks(theme: MapTheme): GameModeLook[] {
-  return [new TideLook(theme), new WerewolfLook(), new SwordholderLook()]
+  return [new TideLook(theme), new WerewolfLook(), new SwordholderLook(), new Survival10Look()]
 }

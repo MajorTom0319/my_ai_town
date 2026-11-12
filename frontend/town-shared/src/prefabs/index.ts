@@ -8,6 +8,7 @@ import type {
 } from '../protocol'
 import { battleRoyale } from './battleRoyale'
 import { swordholder } from './swordholder'
+import { survival10 } from './survival10'
 import { werewolf } from './werewolf'
 
 // 预制小镇：选它就是玩某个玩法，开局前只改几项设置，不用自己建岛、写世界观、一个个请人。
@@ -36,8 +37,13 @@ export interface Prefab {
   climate?: Climate
   /** 开局时调的额度（每人每天、全镇总量……）；没写的项不动 */
   limits?: Partial<AgentLimits>
-  /** 开局时布置地图上的道具：先按实例编号撤掉建镇生成器放的几件，再放这一局要的 */
-  furnish?: { remove: string[]; place: PrefabProp[] }
+  /** 开局时布置地图上的道具：先按实例编号撤掉建镇生成器放的几件，再放这一局要的。
+   *  giveItem 给新放下的带有限补给的道具一个指定的初始份数（公共粮仓的米数）。 */
+  furnish?: {
+    remove: string[]
+    place: PrefabProp[]
+    giveItem?: { id: string; action: string; remaining: number }[]
+  }
   players: { default: number; min: number; max: number }
   /** 「吃喝睡」打开时的生理开关；关掉时全关 */
   needs: PhysiologySwitches
@@ -58,6 +64,7 @@ export interface PrefabProp {
   id: string
   definition: string
   locale: string
+  name?: string
   near?: [number, number]
 }
 
@@ -87,7 +94,7 @@ export function seedOption(label: string, randomHint: string): PrefabOption {
   }
 }
 
-export const PREFABS: Prefab[] = [battleRoyale, werewolf, swordholder]
+export const PREFABS: Prefab[] = [battleRoyale, werewolf, swordholder, survival10]
 
 export function prefabOf(id: string | null | undefined): Prefab | null {
   return PREFABS.find((p) => p.id === id) ?? null

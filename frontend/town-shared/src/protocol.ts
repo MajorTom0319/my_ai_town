@@ -640,6 +640,7 @@ export type GameModeView =
   | ({ kind: 'tide' } & TideView)
   | ({ kind: 'werewolf' } & WerewolfView)
   | ({ kind: 'swordholder' } & SwordholderView)
+  | ({ kind: 'survival10' } & Survival10View)
 /** 打开哪个玩法、带什么设置；set_game_mode 不带它就是关掉 */
 export type GameModeChoice =
   | { kind: 'tide'; seed?: number }
@@ -647,6 +648,7 @@ export type GameModeChoice =
   | { kind: 'werewolf'; seed?: number; day_hours?: number }
   /** 执剑人之夜：seed 定下演说和表态的先后、平票时抽签；day_hours 是白天自由活动几小时（天亮到 16:30 敲钟） */
   | { kind: 'swordholder'; seed?: number; day_hours?: number }
+  | { kind: 'survival10'; seed?: number }
 
 /** 潮水圈里的一个圈：圆心和半径都是行走地图上的米（x 和地面上的 z） */
 export interface TideCircle {
@@ -685,6 +687,48 @@ export interface TideNews {
   text: string
 }
 
+export type Survival10Phase = 'waiting' | 'day' | 'speech' | 'vote' | 'night' | 'jury' | 'over'
+export interface Survival10Seat {
+  seat: number
+  id: string
+  name: string
+  rice: number
+  /** 今天已经实际累计的有效劳动分钟；离开、聊天或做别的事时停表 */
+  worked_minutes: number
+  /** 此刻已经过结算的有效劳动分钟；不进小数的部分在 worked_minutes，劳动中时能随世界时间连续看到 */
+  labor_progress?: number
+  /** 此刻是否在分配到的田块上执行持续的劳动动作；中断后进度保留 */
+  working_now: boolean
+  farm?: string
+  hungry_streak: number
+  out?: string
+  out_day?: number
+}
+export interface Survival10Line {
+  seat: number
+  text: string
+  at: number
+}
+export interface Survival10Ballot {
+  voter: number
+  target?: number
+}
+export interface Survival10View {
+  day: number
+  phase: Survival10Phase
+  public_rice: number
+  produced_today: number
+  registered_today: number
+  seats: Survival10Seat[]
+  notice: string
+  until?: number
+  turn?: number
+  lines: Survival10Line[]
+  ballots: Survival10Ballot[]
+  revealed: boolean
+  history: string[]
+  winner?: number
+}
 export type WerewolfRole = 'wolf' | 'seer' | 'witch' | 'hunter' | 'guard' | 'villager'
 export type WerewolfPhase =
   | 'waiting'
@@ -1135,6 +1179,15 @@ export type ClientMsg =
       instance: Instance
       /** 在地图上点的位置（行走坐标，米）：道具落在它附近的空位 */
       near?: { space: string; position: [number, number] }
+    }
+  /** 把一件带有限补给的道具设成指定余量（公共粮仓的米数），回 prop_result */
+  | {
+      type: 'set_prop_supply'
+      request_id: string
+      world_id: string
+      prop: string
+      action: string
+      remaining: number
     }
   | { type: 'get_placement_grid'; request_id: string; world_id: string }
   /** 试放：同 place_prop，只算会落在哪，不改世界 */

@@ -188,6 +188,14 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         near: Option<PlaceNear>,
     },
+    /// 把镇上一件带有限补给的道具设成指定余量（公共粮仓的米数）；回执与放置一样是 PropResult。
+    SetPropSupply {
+        request_id: String,
+        world_id: String,
+        prop: String,
+        action: String,
+        remaining: u32,
+    },
     SetSpeed {
         request_id: String,
         speed: f64,
@@ -378,6 +386,7 @@ impl ClientMsg {
             | PlaceProp { request_id, .. }
             | GetPlacementGrid { request_id, .. }
             | PreviewPlacement { request_id, .. }
+            | SetPropSupply { request_id, .. }
             | SetSpeed { request_id, .. }
             | SetModelConfig { request_id, .. }
             | SetResidentModel { request_id, .. }

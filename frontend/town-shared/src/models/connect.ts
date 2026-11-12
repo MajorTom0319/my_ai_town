@@ -3,7 +3,8 @@
 // 手机上从底部升起，电脑上居中。它是模态对话框，从别的对话框里打开也盖在最上面。
 // 要填模型名、地址的服务（火山方舟、Ollama、自定义地址）不在这里，进小镇后在「设定 · 模型服务」里配。
 import type { ActiveModelChoice, ProviderConfig, ProviderView } from '../protocol'
-import { PRESETS, localEndpoint, type ProviderPreset } from '../providers'
+import { PRESETS, usableProvider, type ProviderPreset } from '../providers'
+export { usableProvider } from '../providers'
 import { hourRange, priceOf } from '../pricing'
 import { button, el } from '../dom'
 import { errorText } from '../format'
@@ -49,15 +50,6 @@ export interface ModelTransport {
     providers: ProviderConfig[]
     keys: { provider: string; api_key: string }[]
   }): Promise<void>
-}
-
-/** 这个服务现在能用：填过密钥，或者是不用密钥的本机服务 */
-export function usableProvider(p: ProviderView): boolean {
-  return (
-    !!p.key_mask ||
-    PRESETS.find((x) => x.id === p.id)?.needsKey === false ||
-    (!!p.base_url && localEndpoint(p.base_url))
-  )
 }
 
 /** 有没有能用的模型。还没读到配置时为 null */
@@ -123,6 +115,22 @@ export function connectModel(
     const keyName = el('span')
     const field = el('label', '', 'mc-field')
     field.append(keyName, key)
+    const model = el('select')
+    const modelField = el('label', '', 'mc-field')
+    modelField.append(el('span', '模型'), model)
+    function fillModels() {
+      const active = t.config()?.active
+      const chosen = active?.provider === preset.id ? active.model : preset.defaultModel
+      const candidates = [...new Set([chosen, ...preset.models])].filter(Boolean)
+      model.replaceChildren(...candidates.map((candidate) => new Option(candidate, candidate)))
+      model.value = chosen
+    }
+    fillModels()
+    model.onchange = () => {
+      state = 'idle'
+      message = ''
+      render()
+    }
     const status = el('p', '', 'mc-status')
     status.setAttribute('role', 'status')
     const help = el('div', '', 'mc-help')
@@ -140,6 +148,7 @@ export function connectModel(
       heading,
       el('p', o.text, 'mc-text'),
       grid,
+      modelField,
       field,
       status,
       help,
@@ -158,6 +167,7 @@ export function connectModel(
               preset = p
               state = 'idle'
               key.value = ''
+              fillModels()
               render()
             },
             'mc-provider' + (p === preset ? ' on' : '')
@@ -195,10 +205,10 @@ export function connectModel(
             : ''
       )
       confirm.disabled = dismiss.disabled = state === 'testing'
+      model.disabled = state === 'testing'
       confirm.textContent = state === 'testing' ? '正在连接…' : o.confirm
     }
 
-    // 先测通再存：服务、密钥一起写进配置；还没有建镇用的模型时顺便用它
     async function connect() {
       const config = t.config()
       const existing = configured()
@@ -215,18 +225,17 @@ export function connectModel(
         name: existing?.name ?? preset.name,
         base_url: existing?.base_url || preset.baseUrl,
       }
-      const model =
-        config?.active?.provider === preset.id ? config.active.model : preset.defaultModel
+      const chosenModel = model.value
       state = 'testing'
       render()
       try {
-        const tested = await t.test(provider, model, typed)
+        const tested = await t.test(provider, chosenModel, typed)
         if (!tested.ok) throw Error(tested.message || '连接失败')
         const all = (config?.providers ?? []).map(({ id, name, base_url }) =>
           id === provider.id ? provider : { id, name, base_url }
         )
         await t.save({
-          active: config?.active ?? { provider: provider.id, model },
+          active: { provider: provider.id, model: chosenModel },
           providers: existing ? all : [...all, provider],
           keys: typed ? [{ provider: provider.id, api_key: typed }] : [],
         })

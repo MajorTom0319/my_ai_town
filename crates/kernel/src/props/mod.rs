@@ -96,6 +96,9 @@ pub struct Requirement {
 pub struct Action {
     pub id: String,
     pub label: String,
+    /// 由玩法账本维护的展示型补给；不进入通用道具动作索引。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mode_managed: bool,
     pub duration_minutes: f64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<Requirement>,
@@ -356,7 +359,14 @@ impl Action {
             !self.recipient || (self.during.is_empty() && !self.on_complete.is_empty()),
             KernelError::props("对他人施用须使用完成时效果，不能包含持续效果")
         );
-        if let Some(supply) = &self.supply {
+        if self.mode_managed {
+            // 玩法动作只由玩法结算：账本展示可以带补给数字，现场动作可以由玩法认领，但都不能借通用
+            // 完成效果创造道具或身体变化。
+            ensure!(
+                self.on_complete.is_empty() && self.during.is_empty(),
+                KernelError::props("玩法管理的动作不能配置通用道具效果")
+            );
+        } else if let Some(supply) = &self.supply {
             // 补给在完成时统一扣、统一生效，过程中不能先拿到好处；劳作可以，那是做事的人自己的消耗，
             // 不从补给里拿东西（捡木头、采棕榈叶）。
             ensure!(

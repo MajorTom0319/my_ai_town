@@ -2,6 +2,8 @@
 // 全部走 OpenAI 兼容传输——base_url 不含 /chat/completions 后缀（host 拼接）。
 // 模型清单 = 老目录预置 + 常用官方名；页面上模型可自由输入，清单只是候选。
 
+import type { ModelChoice, ProviderView } from './protocol'
+
 export interface ProviderPreset {
   id: string
   name: string
@@ -18,7 +20,41 @@ export const PRESETS: ProviderPreset[] = [
     name: 'MAAS DeepSeek',
     baseUrl: 'https://maas-codex-adapter.cloud.imgo.tv/v1',
     needsKey: true,
-    models: ['maas-deepseek/deepseek-v4-1-flash'],
+    models: [
+      'maas-deepseek/deepseek-v4-1-flash',
+      'maas-deepseek/deepseek-v4-flash-0731',
+      'maas-deepseek/deepseek-v4-pro-0813',
+      'maas-deepseek/fun-asr',
+      'maas-deepseek/g-6-1-s',
+      'maas-deepseek/g-6-a',
+      'maas-deepseek/gemini-2.5-flash-image',
+      'maas-deepseek/gemini-3-pro-image-preview',
+      'maas-deepseek/gemini-3.1-flash-image-preview',
+      'maas-deepseek/glm-5.1',
+      'maas-deepseek/glm-5.2',
+      'maas-deepseek/glm-5.3',
+      'maas-deepseek/gpt-image-2',
+      'maas-deepseek/happy-horse-1.0',
+      'maas-deepseek/happy-horse-1.1',
+      'maas-deepseek/kimi-k3',
+      'maas-deepseek/msd-2-0-fast-260128',
+      'maas-deepseek/msd-2-0-mini-260615',
+      'maas-deepseek/msd-2-0-pro-260128',
+      'maas-deepseek/msd-2-5-260628',
+      'maas-deepseek/msd-video-2.5',
+      'maas-deepseek/msd-video-fast',
+      'maas-deepseek/msd-video-pro',
+      'maas-deepseek/qwen3.7-max',
+      'maas-deepseek/qwen3.7-plus',
+      'maas-deepseek/qwen3.8-flash',
+      'maas-deepseek/qwen3.8-max',
+      'maas-deepseek/seedream-4.5',
+      'maas-deepseek/seedream-5.0-lite',
+      'maas-deepseek/wan2.6',
+      'maas-deepseek/wan2.7',
+      'maas-deepseek/wan2.7-pro',
+      'maas-deepseek/wan3.0',
+    ],
     defaultModel: 'maas-deepseek/deepseek-v4-1-flash',
   },
   {
@@ -148,6 +184,45 @@ export const PRESETS: ProviderPreset[] = [
 
 /** 内置模型：不用地址和密钥，只给村民过日子用，不写人设、不建镇 */
 export const BUILTIN = 'builtin'
+
+export interface ProviderModelOption extends ModelChoice {
+  name: string
+}
+
+export function usableProvider(provider: ProviderView): boolean {
+  return (
+    !!provider.key_mask ||
+    PRESETS.find((preset) => preset.id === provider.id)?.needsKey === false ||
+    (!!provider.base_url && localEndpoint(provider.base_url))
+  )
+}
+
+export function modelOptions(
+  config: { active: ModelChoice | null; providers: ProviderView[] } | null
+): ProviderModelOption[] {
+  if (!config) return []
+  const options: ProviderModelOption[] = []
+  const providers = config.providers.filter(usableProvider)
+  const add = (provider: ProviderView, model: string) => {
+    if (
+      !model ||
+      options.some((option) => option.provider === provider.id && option.model === model)
+    )
+      return
+    options.push({ provider: provider.id, model, name: provider.name })
+  }
+  const active = config.active
+  const chosen = active && providers.find((provider) => provider.id === active.provider)
+  if (chosen && active) add(chosen, active.model)
+  for (const provider of providers) {
+    const preset = PRESETS.find((preset) => preset.id === provider.id)
+    if (preset) {
+      add(provider, preset.defaultModel)
+      for (const model of preset.models) add(provider, model)
+    }
+  }
+  return options
+}
 
 /** 本机或局域网地址上的服务（Ollama、LM Studio 这类）不用密钥；和服务端的判断一致 */
 export function localEndpoint(url: string): boolean {

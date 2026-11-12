@@ -314,7 +314,14 @@ impl ResidentRuntime {
                         requests.push(request);
                     }
                     Ok(None) => {}
-                    Err(error) => self.pause_fault(world, &mut session, error.to_string(), None),
+                    Err(error) => {
+                        let cause = if matches!(error, AgentError::Context(_)) {
+                            HoldCause::Context
+                        } else {
+                            HoldCause::Other
+                        };
+                        self.pause_fault_for(world, &mut session, error.to_string(), None, cause);
+                    }
                 }
             }
             self.state.sessions.insert(actor, session);
@@ -401,9 +408,11 @@ impl ResidentRuntime {
             PlannedRound::Chat => self.chat_draft(world, s, &tools_json)?,
         };
         if draft.estimated > self.input_budget(s) {
-            return Err(AgentError::Context(
-                "最小必要上下文仍超过可用输入额度，请检查模型窗口与居民设定".into(),
-            ));
+            return Err(AgentError::Context(format!(
+                "上下文窗口不足（不是花费额度用尽）：本次请求仍需约 {} token，可用输入额度 {}；请检查过大的输入或模型窗口，当前事务和原文已保留",
+                draft.estimated,
+                self.input_budget(s)
+            )));
         }
         let reserve = draft.estimated
             + draft.estimated * RESERVE_MARGIN_PERCENT / 100

@@ -7,6 +7,7 @@
 //!
 //! 加一个玩法：在这个目录写一个文件，实现 `Rules`；再在下面的 `GameMode`、`each!` 和
 //! `World::set_game_mode` 里各加一项，协议那边在 protocol 的 game_mode 里加对应的类型。
+mod survival10;
 mod swordholder;
 mod tide;
 mod werewolf;
@@ -51,6 +52,30 @@ trait Rules {
     ) -> Result<String> {
         Err(KernelError::action("这个玩法没有要交的动作"))
     }
+    fn check_prop_action(
+        &self,
+        _world: &World,
+        _actor: &str,
+        _spot: &crate::affordance::Spot,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn start_prop_action(
+        &mut self,
+        _world: &World,
+        _actor: &str,
+        _spot: &crate::affordance::Spot,
+    ) -> Result<Option<f64>> {
+        Ok(None)
+    }
+    fn complete_prop_action(
+        &mut self,
+        _world: &mut World,
+        _actor: &str,
+        _spot: &crate::affordance::Spot,
+    ) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
     /// 有人对人动了手（推搡、抢、偷、搜身、拿道具伤人），text 是一句写好的经过，
     /// 比如「骆川用鱼叉刺白鸦，健康 −40」；玩法可以记进自己的战报。
     fn clash(&mut self, _world: &World, _actor: &str, _target: &str, _text: &str) {}
@@ -64,6 +89,7 @@ pub enum GameMode {
     Tide(tide::Tide),
     Werewolf(werewolf::Werewolf),
     Swordholder(swordholder::Swordholder),
+    Survival10(survival10::Survival10),
 }
 
 /// 对开着的玩法调同一个 `Rules` 方法。
@@ -73,6 +99,7 @@ macro_rules! each {
             GameMode::Tide($m) => $body,
             GameMode::Werewolf($m) => $body,
             GameMode::Swordholder($m) => $body,
+            GameMode::Survival10($m) => $body,
         }
     };
 }
@@ -83,6 +110,22 @@ fn id_of<R: Rules>(_: &R) -> &'static str {
 
 impl World {
     /// 开着的玩法的名字；没开时为 None。
+    /// 测试用：把聪明人小镇的粮仓挪到测试地图的地点。
+    #[doc(hidden)]
+    pub fn test_move_granary(&mut self, locale: &str) {
+        if let Some(GameMode::Survival10(m)) = &mut self.game_mode {
+            m.move_granary(locale);
+        }
+    }
+
+    /// 测试用：给某人手里放几袋米（真实流程是白天在粮仓领、夜里从公仓偷）。
+    #[doc(hidden)]
+    pub fn test_give_rice(&mut self, actor: &str, bags: u32) {
+        if let Some(GameMode::Survival10(m)) = &mut self.game_mode {
+            m.give_rice(actor, bags);
+        }
+    }
+
     pub fn game_mode(&self) -> Option<&'static str> {
         self.game_mode.as_ref().map(|g| each!(g, m => id_of(m)))
     }
@@ -101,6 +144,10 @@ impl World {
                     GameModeChoice::Swordholder { .. },
                     Some(GameMode::Swordholder(_))
                 )
+                | (
+                    GameModeChoice::Survival10 { .. },
+                    Some(GameMode::Survival10(_))
+                )
         );
         if same {
             return Ok(());
@@ -115,6 +162,9 @@ impl World {
             ),
             GameModeChoice::Swordholder { seed, day_hours } => GameMode::Swordholder(
                 swordholder::Swordholder::open(self, seed.unwrap_or(1).max(1), *day_hours)?,
+            ),
+            GameModeChoice::Survival10 { seed } => GameMode::Survival10(
+                survival10::Survival10::open(self, seed.unwrap_or(1).max(1))?,
             ),
         };
         self.game_mode = Some(mode);
@@ -173,6 +223,43 @@ impl World {
             return Err(KernelError::action("现在没有开着的玩法"));
         };
         let result = each!(&mut mode, m => m.act(self, actor, action));
+        self.game_mode = Some(mode);
+        result
+    }
+
+    pub(crate) fn game_mode_check_prop_action(
+        &self,
+        actor: &str,
+        spot: &crate::affordance::Spot,
+    ) -> Result<()> {
+        self.game_mode.as_ref().map_or(
+            Ok(()),
+            |mode| each!(mode, rules => rules.check_prop_action(self, actor, spot)),
+        )
+    }
+
+    pub(crate) fn game_mode_start_prop_action(
+        &mut self,
+        actor: &str,
+        spot: &crate::affordance::Spot,
+    ) -> Result<Option<f64>> {
+        let Some(mut mode) = self.game_mode.take() else {
+            return Ok(None);
+        };
+        let result = each!(&mut mode, rules => rules.start_prop_action(self, actor, spot));
+        self.game_mode = Some(mode);
+        result
+    }
+
+    pub(crate) fn game_mode_complete_prop_action(
+        &mut self,
+        actor: &str,
+        spot: &crate::affordance::Spot,
+    ) -> Result<Option<Vec<String>>> {
+        let Some(mut mode) = self.game_mode.take() else {
+            return Ok(None);
+        };
+        let result = each!(&mut mode, rules => rules.complete_prop_action(self, actor, spot));
         self.game_mode = Some(mode);
         result
     }

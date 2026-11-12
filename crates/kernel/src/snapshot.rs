@@ -396,7 +396,7 @@ impl WorldSnapshot {
         )
     }
 
-    /// 补给余量必须对应一个带有限补给的动作，且不超过初始量。
+    /// 补给余量必须对应一个带有限补给的动作；普通补给不超过初始量，玩法账本允许收入。
     fn validate_supplies(&self, topo: &Topology) -> Result<()> {
         for (key, remaining) in &self.supplies {
             let (prop, action_id) =
@@ -415,9 +415,12 @@ impl WorldSnapshot {
                         .and_then(|p| p.definition.actions.iter().find(|a| a.id == action_id))
                 });
             ensure!(
-                action
-                    .and_then(|a| a.supply.as_ref())
-                    .is_some_and(|s| *remaining <= s.initial),
+                action.is_some_and(|action| {
+                    action
+                        .supply
+                        .as_ref()
+                        .is_some_and(|supply| action.mode_managed || *remaining <= supply.initial)
+                }),
                 KernelError::snapshot("资源剩余状态无效")
             );
         }

@@ -321,21 +321,34 @@ export function createPrefabSetup(d: {
 
   /** 按预制小镇的布置撤掉、放上道具；撤和放同一个编号再做一次都没有副作用，出错后可以从头再来 */
   async function furnish(f: NonNullable<Prefab['furnish']>) {
-    for (const id of f.remove)
-      // 建镇生成器换了版本、编号对不上时少撤一件不要紧
+    d.send({ type: 'get_props' })
+    const catalog = await waitFor((message) =>
+      message.type === 'props' ? message.catalog : undefined
+    )
+    const existing = new Set(catalog.instances.map((prop) => prop.id))
+    for (const id of f.remove.filter((id) => existing.has(id)))
       await propCommand((world_id, request_id) => ({
         type: 'remove_prop',
         request_id,
         world_id,
         id,
-      })).catch(() => undefined)
-    for (const { id, definition, locale, near } of f.place)
+      }))
+    for (const { id, definition, locale, name, near } of f.place)
       await propCommand((world_id, request_id) => ({
         type: 'place_prop',
         request_id,
         world_id,
-        instance: { id, definition, locale },
+        instance: { id, definition, locale, ...(name && { name }) },
         ...(near && { near: { space: OUTDOOR_SPACE, position: near } }),
+      }))
+    for (const { id, action, remaining } of f.giveItem ?? [])
+      await propCommand((world_id, request_id) => ({
+        type: 'set_prop_supply',
+        request_id,
+        world_id,
+        prop: id,
+        action,
+        remaining,
       }))
   }
 

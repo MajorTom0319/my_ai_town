@@ -34,7 +34,7 @@ import {
 } from 'town-shared/models/builtin'
 import { createBuiltinRows } from 'town-shared/models/builtinRows'
 import { onBack } from 'town-shared/platform'
-import { BUILTIN, PRESETS } from 'town-shared/providers'
+import { BUILTIN, PRESETS, modelOptions, type ProviderModelOption } from 'town-shared/providers'
 import { settingRow } from 'town-shared/settings/controls'
 import { createDisplayPage } from 'town-shared/settings/display'
 import { createSoundPage } from 'town-shared/settings/sound'
@@ -237,28 +237,24 @@ export function installHomeSettings(deps: { music: { enabled(): boolean; toggle(
     }
     const choose = el('select')
     choose.setAttribute('aria-label', '建镇用的模型')
-    for (const p of usable) {
-      const model =
-        config?.active?.provider === p.id
-          ? config.active.model
-          : (PRESETS.find((x) => x.id === p.id)?.defaultModel ?? '')
-      choose.append(new Option(`${p.name} · ${model}`, p.id))
+    const options = modelOptions({ active: config?.active ?? null, providers: usable })
+    options.forEach((option, index) =>
+      choose.append(new Option(`${option.name} · ${option.model}`, String(index)))
+    )
+    choose.onchange = () => {
+      const option = options[Number(choose.value)]
+      if (option) void saveTool(option)
     }
-    choose.value = config?.active?.provider ?? ''
-    choose.onchange = () => void saveTool(choose.value)
     toolRows.replaceChildren(settingRow('一句话建镇时理解你的描述', '只在建镇时调用一次', choose))
   }
 
-  async function saveTool(provider: string) {
+  async function saveTool(choice: ProviderModelOption) {
     const config = transport.config()
     if (!config) return
-    const preset = PRESETS.find((p) => p.id === provider)
-    const model =
-      config.active?.provider === provider ? config.active.model : (preset?.defaultModel ?? '')
     status.textContent = '保存中…'
     try {
       await transport.save({
-        active: { provider, model },
+        active: { provider: choice.provider, model: choice.model },
         providers: config.providers.map(({ id, name, base_url }) => ({ id, name, base_url })),
         keys: [],
       })

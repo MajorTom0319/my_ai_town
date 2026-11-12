@@ -588,6 +588,8 @@ export class TownMap {
         this.svg.classList.add('hd2d')
         this.applyMarkerScale()
         if (this.clock) this.hd.setClock(...this.clock)
+        // 名册往往在立体场景加载前就到了；玩法 HUD 建在 hd 里，建好后补发最近一份状态。
+        if (this.metre) this.hd.setGameMode(this.lastRoster?.game_mode ?? null, this.metre)
         this.rooms.attach(this.svg, this.hd.houses)
         this.hd.onRoomsClosed = (ids) => {
           if (this.rooms.closed(ids)) this.refreshRooms()

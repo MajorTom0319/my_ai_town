@@ -41,6 +41,37 @@ fn needs_use_the_actual_activity_time_at_any_step_size() {
     assert!(coarse.0 > 20.0, "吃过饭饱腹回升：{coarse:?}");
 }
 
+#[test]
+fn completed_actions_settle_and_start_the_next_action_after_reload() {
+    let mut world = common::world_with(topology(), 720.0, &[("resident", "阿树", "loc_a")]);
+    let revision = world.actor("resident").unwrap().actions.revision;
+    let actions = [
+        json!({"intent": {"verb": "停留", "duration_minutes": 1.0}}),
+        json!({"intent": {"verb": "前往", "locale": "loc_b"}}),
+        json!({"intent": {"verb": "制作器物"}, "prop_id": "bench_b"}),
+    ]
+    .map(|draft| serde_json::from_value(draft).unwrap());
+    world
+        .run_actions("resident", "trip", revision, &actions)
+        .unwrap();
+    world.step(0.75);
+    let mut restored = common::restore(
+        &world,
+        common::world_with(topology(), 720.0, &[("resident", "阿树", "loc_a")]),
+    );
+    restored.step(0.25);
+    let group = restored.action_group("resident", "trip").unwrap();
+    assert_eq!(group.results.len(), 1);
+    assert_eq!(group.results[0].status, protocol::ActionStatus::Succeeded);
+    restored.step(12.0);
+    let group = restored.action_group("resident", "trip").unwrap();
+    assert_eq!(group.status, protocol::GroupStatus::Succeeded);
+    assert_eq!(group.results.len(), 3);
+    assert_eq!(restored.actor("resident").unwrap().locus.locale, "loc_b");
+    restored.step(1.0);
+    assert_eq!(restored.minutes(), 734.0);
+}
+
 /// 快进的空档：有人还在路上时没有；都在做有结束时间的事时，是离最近一个人做完的分钟数；
 /// 空等的人按 Agent 约好的再想时间算，没约就没有空档。
 #[test]

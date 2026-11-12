@@ -141,6 +141,9 @@ impl Affordances {
         props.sort_by(|a, b| a.id.cmp(&b.id));
         for p in props {
             for v in &p.verbs {
+                if v.action.as_ref().is_some_and(|a| a.mode_managed) {
+                    continue;
+                }
                 let spot = Spot::from_verb(p, v);
                 aff.by_prop
                     .insert((p.id.clone(), v.verb.clone()), spot.clone());
@@ -176,7 +179,6 @@ impl Affordances {
     pub fn for_prop(&self, prop: &str, verb: &str) -> Option<&Spot> {
         self.by_prop.get(&(prop.into(), verb.into()))
     }
-
     pub fn spot(&self, locale: &str, verb: &str) -> Option<&Spot> {
         self.spots.get(&(locale.to_string(), verb.to_string()))
     }

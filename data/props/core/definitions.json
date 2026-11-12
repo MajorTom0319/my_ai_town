@@ -3155,5 +3155,90 @@
         ]
       }
     ]
+  },
+  {
+    "id": "core:public-granary",
+    "version": 2,
+    "name": "公共粮仓",
+    "description": "全村的米都堆在这里。袋子上挂着公开的账本：领走、偷走都在这里记账；领米必须在粮仓完成取粮动作。",
+    "actions": [
+      {
+        "id": "take",
+        "label": "公共米粮账本（玩法管理）",
+        "mode_managed": true,
+        "duration_minutes": 1,
+        "supply": {
+          "initial": 21,
+          "cost": 1
+        }
+      },
+      {
+        "id": "collect",
+        "label": "取粮",
+        "duration_minutes": 10,
+        "completion": "activity"
+      }
+    ]
+  },
+  {
+    "id": "core:private-ration-sack",
+    "version": 2,
+    "name": "私粮袋",
+    "description": "自己家的私粮袋。袋里有多少米只由十日生存玩法账本结算；其他参赛者不知道你的存粮数量。",
+    "actions": [
+      {
+        "id": "ledger",
+        "label": "十日生存私粮账本（玩法管理）",
+        "mode_managed": true,
+        "duration_minutes": 1,
+        "supply": {
+          "initial": 0,
+          "cost": 1
+        }
+      },
+      {
+        "id": "collect",
+        "label": "取粮",
+        "duration_minutes": 10,
+        "completion": "activity"
+      }
+    ],
+    "storage_slots": 0
+  },
+  {
+    "id": "core:survival10-farm",
+    "version": 1,
+    "name": "公共农田",
+    "description": "全村的公共农田。随时可以下地，干活累计满八小时才算一天收成；干活时不能聊天。",
+    "storage_slots": 0,
+    "actions": [
+      {
+        "id": "work",
+        "label": "下地干活",
+        "duration_minutes": 120,
+        "during": [
+          {
+            "kind": "labor"
+          }
+        ],
+        "completion": "activity"
+      }
+    ]
+  },
+  {
+    "id": "core:survival10-farm",
+    "version": 2,
+    "name": "公共农田田块",
+    "description": "公共农田的独立劳动田块。每天最多四人报名，报名后使用分配的田块；累计实际劳动满八小时产一袋米入公仓。聊天、离开会停表，回来补足剩余时间；名额不转让，进度不过夜。",
+    "storage_slots": 0,
+    "actions": [
+      {
+        "id": "work",
+        "label": "下地干活",
+        "duration_minutes": 480,
+        "during": [{ "kind": "labor" }],
+        "completion": "activity"
+      }
+    ]
   }
 ]
