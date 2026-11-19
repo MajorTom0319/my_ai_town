@@ -76,6 +76,8 @@ pub struct Interactions {
     /// 每人最近一句台词在哪：由聊天记录派生，不存档；写台词时更新，读档时重建。
     /// 名册每拍都要给每个人取最近台词，不必每次扫全部聊天。
     latest_speech: BTreeMap<String, SpeechRef>,
+    /// 这一拍新报的剧本事实（台词），世界取走后清空；不存档。
+    pub(crate) manuscript: Vec<crate::world::ManuscriptFact>,
 }
 
 /// 一句台词的位置。比较先看时刻，再看聊天编号，最后看序号。
@@ -109,6 +111,7 @@ impl Interactions {
         let mut restored = Self {
             items,
             latest_speech: BTreeMap::new(),
+            manuscript: Vec::new(),
         };
         let speeches: Vec<_> = restored
             .items

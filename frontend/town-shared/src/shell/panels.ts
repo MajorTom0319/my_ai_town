@@ -25,6 +25,7 @@ import { createModelSession } from '../models/session'
 import { createNotices } from '../notices'
 import { createTownPanel } from '../town/panel'
 import { createDirectorPanel, type DirectorPanel } from '../director/panel'
+import { createManuscriptPanel } from '../manuscript/panel'
 import { installPauseHint, type PauseHint } from '../pauseHint'
 import { initProps } from '../props/page'
 import type { ClientMsg, JoinOutcome, ServerMsg, TemplateCard } from '../protocol'
@@ -179,11 +180,21 @@ export function createPanels(input: ShellInputs) {
   })
   // 世界导演：地图右侧的浮窗，地图底部「导演」格和菜单里的「导演」都能开；世界标识取自道具目录
   let worldId: string | undefined
+  let manuscript: ReturnType<typeof createManuscriptPanel> | undefined
   const director = createDirectorPanel({
     send,
     save: input.save,
     worldId: () => worldId,
+    onOpen: () => manuscript?.close(),
   })
+  // 实时剧本：底部「剧本」格和菜单都能开；与导演互斥，同一时间只留一个大面板。
+  manuscript = createManuscriptPanel({
+    send,
+    worldId: () => worldId,
+    onOpen: () => director.close(),
+  })
+  const openDirector = () => director.open()
+  const openManuscript = () => manuscript?.open()
   const center = initSettingsCenter({
     send,
     onBack: () => session.exit(),
@@ -351,9 +362,22 @@ export function createPanels(input: ShellInputs) {
   }
   const shell = {
     ...parts,
-    ...{ books, props, center, notices, avatar, open, emptyTown, models, modelWait, director },
+    ...{
+      books,
+      props,
+      center,
+      notices,
+      avatar,
+      open,
+      emptyTown,
+      models,
+      modelWait,
+      director,
+      manuscript,
+      openDirector,
+      openManuscript,
+    },
     ...pages,
-    openDirector: () => director.open(),
   }
   return { ...shell, ...register(input, shell) }
 }
@@ -483,6 +507,9 @@ interface RegisteredParts {
   emptyTown: ReturnType<typeof installEmptyTown>
   modelWait: ReturnType<typeof installModelWait>
   director: DirectorPanel
+  manuscript: ReturnType<typeof createManuscriptPanel>
+  openDirector: () => void
+  openManuscript: () => void
 }
 
 /** 按顺序登记各面板；名册与世界重置由这里整理后再逐个通知 */
@@ -591,6 +618,7 @@ function register(input: ShellInputs, p: RegisteredParts) {
     p.books.panel,
     p.props,
     p.director,
+    p.manuscript,
     hubs.tuning,
     // 模型配置只旁听，排在设定中心前面
     p.models.panel,

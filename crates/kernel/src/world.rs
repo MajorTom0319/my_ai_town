@@ -8,7 +8,9 @@ use crate::{
     interactions::Interactions, inventory::Inventory, navigation::space::Placer, props::Props,
     topology::Topology,
 };
-use protocol::{EventInfo, NeedRules, PhysiologySwitches};
+use protocol::{
+    EventInfo, ManuscriptKind, ManuscriptTone, ManuscriptVisibility, NeedRules, PhysiologySwitches,
+};
 
 pub use crate::activity::{ActKind, Activity, TravelStage};
 pub use crate::actor::Actor;
@@ -62,6 +64,27 @@ pub struct World {
     pub(crate) walk_trails: crate::interactions::WalkTrails,
     /// 每人上次所在的已知地点（sightings.rs），不存档；为空表示还没开始记。
     pub(crate) places_seen: Option<std::collections::BTreeMap<String, Option<String>>>,
+    /// 自上次取走后新发生的剧本事实（manuscript.rs），不存档；host 每拍取走写进剧本流水。
+    pub(crate) manuscript_outbox: Vec<ManuscriptFact>,
+    /// 供剧本去重的世界日志编号，不存档。它不让同一分钟、同一场合的两句真话互相吞掉。
+    manuscript_logseq: u64,
+}
+
+/// 一条已确认的剧本事实：内核在台词、心声和动作结果落进各人经历的位置报出，host 原样收进剧本。
+/// 它只是给玩家看的旁白，不改变任何人的记忆，也不进给模型的观察。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManuscriptFact {
+    pub kind: protocol::ManuscriptKind,
+    pub visibility: protocol::ManuscriptVisibility,
+    pub tone: protocol::ManuscriptTone,
+    pub actor: Option<String>,
+    pub name: Option<String>,
+    pub locale: Option<String>,
+    pub text: String,
+    pub about: Vec<String>,
+    pub source: String,
+    /// 发生时的模拟分钟；host 写进流水，排序以它为准
+    pub at: f64,
 }
 
 impl World {
@@ -89,6 +112,8 @@ impl World {
             happenings: Default::default(),
             walk_trails: Default::default(),
             places_seen: None,
+            manuscript_outbox: Vec::new(),
+            manuscript_logseq: 0,
         }
     }
 
@@ -145,7 +170,90 @@ impl World {
         })
     }
 
+    /// 报一条剧本事实。去重由 host 按 source 做；空正文不报。
+    pub(crate) fn manuscript(&mut self, fact: ManuscriptFact) {
+        if !fact.text.trim().is_empty() {
+            self.manuscript_outbox.push(ManuscriptFact {
+                at: self.minutes,
+                ..fact
+            });
+        }
+    }
+
+    /// 报一件只有部分人或没有居民知道的事：剧本给玩家看，但不借私密日志改任何人的记忆。
+    /// `about` 是与这件事直接有关的人；公开事件仍走世界日志，好让在场的人照常看见。
+    #[allow(clippy::too_many_arguments)]
+    pub fn manuscript_fact(
+        &mut self,
+        kind: protocol::ManuscriptKind,
+        visibility: protocol::ManuscriptVisibility,
+        actor: Option<&str>,
+        locale: Option<&str>,
+        text: impl Into<String>,
+        about: Vec<String>,
+        source: impl Into<String>,
+    ) {
+        let name = actor.and_then(|id| self.actors.get(id).map(|a| a.name.clone()));
+        self.manuscript(ManuscriptFact {
+            kind,
+            visibility,
+            tone: protocol::ManuscriptTone::Result,
+            actor: actor.map(str::to_owned),
+            name,
+            locale: locale.map(str::to_owned),
+            text: text.into(),
+            about,
+            source: source.into(),
+            at: self.minutes,
+        });
+    }
+
+    /// 取走这一拍新报的剧本事实。动作回执写在本人身上，读档时跳过，不补记。
+    pub fn take_manuscript(&mut self) -> Vec<ManuscriptFact> {
+        for actor in self.actors.values_mut() {
+            if let Some(events) = actor.manuscript_outbox.take() {
+                self.manuscript_outbox.extend(events);
+            }
+        }
+        self.manuscript_outbox
+            .append(&mut self.interactions.manuscript);
+        let mut facts = std::mem::take(&mut self.manuscript_outbox);
+        // 台词、心声和动作可能在同一拍里由不同出口报出；剧本按发生时刻排，贡献者顺序不决定故事顺序。
+        facts.sort_by(|a, b| {
+            a.at.total_cmp(&b.at)
+                .then_with(|| a.source.cmp(&b.source))
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        facts
+    }
+
     pub(crate) fn log(&mut self, info: EventInfo, text: String) {
+        self.manuscript_logseq += 1;
+        if let Some(speech) = &info.speech {
+            // 玩法在公开场合或频道里说的一段话：正文是完整的一行，剧本里收原话。
+            let fact = ManuscriptFact {
+                kind: ManuscriptKind::Speech,
+                visibility: if speech.public {
+                    ManuscriptVisibility::Public
+                } else {
+                    ManuscriptVisibility::Private
+                },
+                tone: ManuscriptTone::Statement,
+                actor: info.actor.as_ref().map(|a| a.id.clone()),
+                name: info.actor.as_ref().map(|a| a.name.clone()),
+                locale: info
+                    .actor
+                    .as_ref()
+                    .and_then(|a| self.actors.get(&a.id))
+                    .map(|a| a.locus.locale.clone()),
+                text: speech.text.clone(),
+                // 玩法只写明了自己的听众范围；秘密频道不谎称对众人公开，具体听众由该玩法的经历记录佐证。
+                about: info.actor.iter().map(|a| a.id.clone()).collect(),
+                source: format!("speech:{}-{}", self.manuscript_logseq, speech.occasion),
+                at: self.minutes,
+            };
+            self.manuscript(fact);
+        }
         self.events.push(Event::Log {
             minutes: self.minutes,
             text,

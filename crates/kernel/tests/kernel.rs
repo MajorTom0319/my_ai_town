@@ -10,6 +10,7 @@ mod harm;
 mod interactions;
 mod inventory;
 mod island;
+mod manuscript;
 mod physiology;
 mod precise_navigation;
 mod props;

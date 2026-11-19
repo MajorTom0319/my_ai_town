@@ -152,7 +152,7 @@ impl Runtime {
                             .into()
                     }
                     Some(GameModeChoice::Survival10 { .. }) => {
-                        "聪明人小镇已打开：七人十日、21袋公粮、每天最多4袋、偶数天篝火投票".into()
+                        "聪明人小镇已打开：七人十日、21袋公粮、每天最多4袋；偶数天18:00晚餐后前往篝火广场，18:30晚会开始，逐人发言后统一记名投票".into()
                     }
                     None => "玩法已关掉，世界恢复原样".into(),
                 }),
@@ -273,6 +273,7 @@ impl Runtime {
             provider: self.driver.target.provider.clone(),
             ready: self.world_settings.ready(),
             recording: self.world_settings.recording,
+            auto_summary: self.world_settings.auto_summary,
             revision: self.world_settings.revision,
             world_id: self.population.world_id.clone(),
             worldview: self.world_settings.worldview.clone(),

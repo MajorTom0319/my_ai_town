@@ -31,6 +31,10 @@ pub struct WorldSettings {
     /// 录像开关（见 recording.rs）：新世界和没有这一项的旧存档都按开着算，好剧情不会没录上
     #[serde(default = "recording_on")]
     pub recording: bool,
+    /// 自动整理剧情概览：有足够新实录或关键公告时调用整理模型；随存档保存，缺省为开。
+    /// 手动「整理概览」不受这个开关影响。
+    #[serde(default = "recording_on")]
+    pub auto_summary: bool,
     /// 旧存档里开发用「手动验证」模式的开关。这个模式已经删掉，只为读得进旧存档，不再使用也不再写出
     #[serde(default, rename = "autonomous", skip_serializing)]
     _autonomous: bool,
@@ -46,6 +50,7 @@ impl Default for WorldSettings {
             worldview: String::new(),
             revision: 0,
             recording: recording_on(),
+            auto_summary: recording_on(),
             _autonomous: false,
         }
     }

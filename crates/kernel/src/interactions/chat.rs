@@ -2,11 +2,23 @@
 use super::{check_message, Interactions};
 use crate::actor::{Actor, Actors};
 use crate::error::{KernelError, Result};
+use crate::world::ManuscriptFact;
 use protocol::{
     ChatEntry, ChatEntryKind, ChatState, FactKind, Interaction, InteractionCommand as Command,
-    InteractionStatus as Status,
+    InteractionStatus as Status, ManuscriptKind, ManuscriptTone, ManuscriptVisibility,
 };
 use std::collections::BTreeSet;
+
+/// 离开或结束聊天时放开一个人：活动指向这场聊天的回到空等；同行的带路人和玩家操控的同行者
+/// 没占活动，正在做的事（比如带路的「前往」）照旧，只让旧观察作废。
+fn release(actors: &mut Actors, now: f64, actor: &str, id: &str) {
+    let a = actors.get_mut(actor).expect("聊天成员存在");
+    if a.current.interaction.as_deref() == Some(id) {
+        a.reset_idle(now, true);
+    } else {
+        a.actions.bump_revision();
+    }
+}
 
 /// 交谈互动的聊天状态。交谈邀请创建时就带着聊天状态，只对已确认是交谈的互动调用。
 pub(super) fn chat_of(item: &Interaction) -> &ChatState {
@@ -530,16 +542,23 @@ impl Interactions {
                 .or_default()
                 .push(event);
         }
-    }
-}
-
-/// 离开或结束聊天时放开一个人：活动指向这场聊天的回到空等；同行的带路人和玩家操控的同行者
-/// 没占活动，正在做的事（比如带路的「前往」）照旧，只让旧观察作废。
-fn release(actors: &mut Actors, now: f64, actor: &str, id: &str) {
-    let a = actors.get_mut(actor).expect("聊天成员存在");
-    if a.current.interaction.as_deref() == Some(id) {
-        a.reset_idle(now, true);
-    } else {
-        a.actions.bump_revision();
+        if kind == ChatEntryKind::Speech {
+            // 台词在提交后原样记进剧本；听见的人就是当时在聊天里的人。它不是新的世界事实，
+            // 不写回任何人的记忆，也不进给模型的观察。普通交谈只在参与者之间发生，
+            // 即使说话人也在听众里，也不是对全镇公开。
+            let fact = ManuscriptFact {
+                kind: ManuscriptKind::Speech,
+                visibility: ManuscriptVisibility::Private,
+                tone: ManuscriptTone::Statement,
+                actor: Some(actor.into()),
+                name: Some(name),
+                locale: Some(locale),
+                text: text.into(),
+                about: audience.iter().cloned().collect(),
+                source: format!("chat:{id}:{seq}"),
+                at: now,
+            };
+            self.manuscript.push(fact);
+        }
     }
 }

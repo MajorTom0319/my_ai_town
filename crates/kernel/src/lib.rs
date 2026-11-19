@@ -66,7 +66,7 @@ pub use journal::{Journal, Thought};
 pub use needs::default_tuning;
 pub use snapshot::{WorldCheckpoint, WorldSnapshot};
 pub use topology::Topology;
-pub use world::{Event, World};
+pub use world::{Event, ManuscriptFact, World};
 
 /// 各类编号（命令、互动、行走空间、天气请求、作者，以及 host 回显的请求编号）的字节上限。
 pub const ID_MAX_BYTES: usize = 160;

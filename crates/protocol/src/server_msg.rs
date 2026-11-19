@@ -28,6 +28,8 @@ pub struct WorldSettingsView {
     /// 录像开关：开着时把广播给页面的消息录进小镇目录，事后能重演、换角度拍素材。
     /// 随存档保存，缺省为开；真的在录哪一卷看 `Recordings.live`。
     pub recording: bool,
+    /// 剧情概览的自动整理开关：随存档保存，缺省为开；关掉时实录照常追加、手动整理仍可用。
+    pub auto_summary: bool,
     pub revision: u64,
     /// 陌生环境：村民初来乍到，只知道到过的地方。随存档保存，缺省为关。
     pub strangers: bool,
@@ -282,4 +284,22 @@ pub enum ServerMsg {
     DirectorReply { entry: crate::DirectorEntry },
     /// 导演会话与待触发事项；只回给发问的页面。
     DirectorState { state: crate::DirectorState },
+    /// 实时剧本的最近一页或断线后补齐的一段；只回给发问的页面。
+    ManuscriptPage { page: crate::ManuscriptPage },
+    /// 新写进剧本的条目，按编号顺序；广播给所有连接。没有新条目时不发。
+    ManuscriptAppend {
+        entries: Vec<crate::ManuscriptEntry>,
+    },
+    /// 玩家刚刚生成或读到的剧情概览；summary 为空表示还没整理或没有可用模型。
+    /// 手动请求的立即回执与最后的整理结果都带同一个 request_id；自动整理的结果不带。
+    ManuscriptSummary {
+        summary: Option<crate::ManuscriptSummary>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// 这次是模型刚整理完的新结果（自动整理也广播给所有页面）
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        generated: bool,
+    },
 }

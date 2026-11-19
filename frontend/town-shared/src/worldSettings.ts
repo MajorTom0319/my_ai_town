@@ -286,6 +286,57 @@ export function createWorldSettings(
         done
       )
     },
+    /** 世界观面板「剧本」一节里的自动整理开关；切换就保存，不带修订号，世界不暂停。
+     *  显示值始终来自后端回读。 */
+    autoSummarySwitch() {
+      const root = el('section', '', 'physiology-switches town-rule')
+      const row = el('label', '', 'physiology-row')
+      const input = el('input')
+      input.type = 'checkbox'
+      input.id = 'town-auto-summary'
+      input.setAttribute('role', 'switch')
+      row.htmlFor = input.id
+      const description = el('small')
+      const text = el('span', '', 'physiology-text')
+      text.append(el('b', '自动整理剧情概览'), description)
+      row.append(input, text)
+      const status = el('p', '', 'physiology-status')
+      status.setAttribute('role', 'status')
+      root.append(
+        row,
+        el(
+          'p',
+          '攒下足够的新实录或出现关键公告时，让模型归纳一次局势。关掉不影响记录台词与结果，仍可在剧本面板手动整理。',
+          'physiology-note'
+        ),
+        status
+      )
+      function render() {
+        input.checked = !!state?.auto_summary
+        input.disabled = !state || !online || !!pending
+        row.classList.toggle('off', !input.checked)
+        description.textContent = input.checked
+          ? '有新剧情时自动更新概览。'
+          : '不自动调用模型；需要时在剧本面板点「整理概览」。'
+      }
+      input.addEventListener('change', () => {
+        status.textContent = '正在保存…'
+        submit(
+          (current, id) => ({
+            type: 'set_auto_summary',
+            request_id: id,
+            world_id: current.world_id,
+            enabled: input.checked,
+          }),
+          (ok, message) => {
+            status.textContent = ok ? `✓ ${message}` : message
+            render()
+          }
+        )
+        render()
+      })
+      return { el: root, render }
+    },
     /** 删掉录完的一卷 */
     deleteRecording(reel: string, done: Done) {
       submit(

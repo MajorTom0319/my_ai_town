@@ -10,7 +10,7 @@
 use crate::error::{KernelError, Result};
 use crate::intent::BuiltinVerb;
 use crate::{avatar::Reach, props::Need, World};
-use protocol::{ActionDraft, BodyEventKind, DeathCause, EventActor, Killing};
+use protocol::{ActionDraft, BodyEventKind, DeathCause, EventActor, Killing, ManuscriptVisibility};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -219,7 +219,7 @@ impl World {
             }
         }
         self.feel(target, felt, format!("被{me}推了一把"));
-        self.happened(actor, target, format!("{me}推了{them}一把"));
+        self.happened(actor, target, format!("{me}推了{them}一把"), "push");
         changes
     }
 
@@ -239,7 +239,12 @@ impl World {
                 format!("{me}从你手里抢走了{thing}"),
                 format!("{thing}被{me}抢走了"),
             );
-            self.happened(actor, target, format!("{me}从{them}手里抢走了{thing}"));
+            self.happened(
+                actor,
+                target,
+                format!("{me}从{them}手里抢走了{thing}"),
+                item,
+            );
             Ok(vec![format!("从{them}手里抢走了{thing}")])
         } else {
             self.feel(
@@ -247,7 +252,12 @@ impl World {
                 format!("{me}想抢你的{thing}，被你护住了"),
                 format!("{me}想抢{thing}"),
             );
-            self.happened(actor, target, format!("{me}想抢{them}的{thing}，没抢到"));
+            self.happened(
+                actor,
+                target,
+                format!("{me}想抢{them}的{thing}，没抢到"),
+                item,
+            );
             Ok(vec![format!("想抢{them}的{thing}，被{them}护住了，没抢到")])
         }
     }
@@ -271,6 +281,7 @@ impl World {
                 actor,
                 target,
                 format!("{me}偷拿{them}的{thing}时，{them}醒了"),
+                item,
             );
             return Ok(vec![format!("正要拿{thing}，{them}醒了，没偷成")]);
         }
@@ -285,7 +296,7 @@ impl World {
         } else {
             format!("趁{them}倒在地上，从{them}身上")
         };
-        self.happened(actor, target, format!("{me}{how}拿走了{thing}"));
+        self.happened(actor, target, format!("{me}{how}拿走了{thing}"), item);
         Ok(vec![if dead {
             format!("{how}拿走了{thing}")
         } else {
@@ -314,7 +325,12 @@ impl World {
             }
         }
         let list = taken.join("、");
-        self.happened(actor, target, format!("{me}搜了{them}的身，拿走了{list}"));
+        self.happened(
+            actor,
+            target,
+            format!("{me}搜了{them}的身，拿走了{list}"),
+            "loot",
+        );
         let mut changes = vec![format!("从{them}的尸体上拿走了{list}")];
         if !left.is_empty() {
             changes.push(format!("背包放不下，{}留在了他身上", left.join("、")));
@@ -372,11 +388,22 @@ impl World {
     }
 
     /// 旁人看见的和观察日志：同一处所醒着、能行动的人（不含双方）记下所见并收到通知。
-    fn happened(&mut self, actor: &str, target: &str, text: String) {
+    /// `item` 是抢、偷所针对的道具，推搡和搜身则写动作名，保证同一秒的不同动手各有来源。
+    fn happened(&mut self, actor: &str, target: &str, text: String, item: &str) {
         let locale = self.actors[actor].locus.locale.clone();
         self.onlookers(&locale, &[actor, target], &format!("看见{text}"), true);
         self.game_mode_clash(actor, target, &text);
         let info = self.actors[actor].event_info();
+        let about = vec![actor.to_string(), target.to_string()];
+        self.manuscript_fact(
+            protocol::ManuscriptKind::Action,
+            ManuscriptVisibility::Public,
+            Some(actor),
+            Some(&locale),
+            text.clone(),
+            about,
+            format!("force:{item}:{}", self.minutes),
+        );
         self.log(info, text);
     }
 

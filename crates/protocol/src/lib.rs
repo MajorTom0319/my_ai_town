@@ -22,6 +22,7 @@ mod content;
 mod director;
 mod interactions;
 mod location;
+mod manuscript;
 mod model_config;
 mod needs;
 mod notebook;
@@ -61,6 +62,10 @@ pub use interactions::{
     Gesture, Interaction, InteractionCommand, InteractionKind, InteractionStatus,
 };
 pub use location::{At, Locus};
+pub use manuscript::{
+    ManuscriptEntry, ManuscriptKind, ManuscriptPage, ManuscriptSummary, ManuscriptTone,
+    ManuscriptVisibility,
+};
 pub use model_config::{
     ActiveModelChoice, ModelChoice, ProviderConfigMsg, ProviderKeyMsg, ProviderView,
 };

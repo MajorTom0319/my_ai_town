@@ -15,6 +15,7 @@ mod avatar;
 mod conductor;
 mod join;
 mod library_commands;
+mod manuscript;
 mod network;
 mod prop_commands;
 mod recording_commands;
@@ -234,6 +235,12 @@ fn build_runtime(
     } else {
         0.0
     };
+    let manuscript_root = store
+        .as_ref()
+        .and_then(|s| s.path().parent())
+        .map(Path::to_path_buf);
+    let manuscript =
+        manuscript::Manuscript::open(manuscript_root.as_deref(), &population.world_id)?;
     Ok(Runtime {
         setup,
         avatar_control: avatar::Control::default(),
@@ -251,9 +258,17 @@ fn build_runtime(
         save_failed: false,
         tape: Default::default(),
         reels,
+        manuscript,
+        manuscript_root,
         director: conductor::Director::new(director_saved),
         director_tasks: host::tasks::TaskPool::new(1, 2),
         director_outbox: Vec::new(),
+        manuscript_pending: Vec::new(),
+        summary_state: Default::default(),
+        summary_wait: std::time::Instant::now(),
+        summary_batch: args.summary_batch,
+        auto_summary_gap: std::time::Duration::from_secs(90),
+        director_events: Vec::new(),
         director_recent: Default::default(),
         director_pending_persist: false,
         director_props_changed: false,

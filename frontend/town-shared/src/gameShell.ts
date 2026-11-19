@@ -181,6 +181,7 @@ export function startGameShell(
     openTown: panels.town.open,
     openResidents: panels.open.residents,
     openDirector: panels.openDirector,
+    openManuscript: panels.openManuscript,
     help: { openGuide: () => guide.open(), resetTips },
     onOpen: () => panels.avatar.stopMoving(),
   })

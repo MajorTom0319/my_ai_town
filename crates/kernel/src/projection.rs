@@ -105,7 +105,13 @@ fn roster(world: &World, speed: f64) -> ServerMsg {
                 chat: world
                     .interactions
                     .chat_presence(&world.actors, a, world.minutes),
-                speech: world.interactions.latest_speech(&a.id),
+                speech: match (
+                    world.interactions.latest_speech(&a.id),
+                    world.game_mode_speech(&a.id),
+                ) {
+                    (Some(chat), Some(mode)) => Some(if mode.at >= chat.at { mode } else { chat }),
+                    (chat, mode) => chat.or(mode),
+                },
                 inventory: world.inventory_view(&a.id),
                 id: a.id.clone(),
                 name: a.name.clone(),

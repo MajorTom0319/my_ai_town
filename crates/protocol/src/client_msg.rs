@@ -114,6 +114,13 @@ pub enum ClientMsg {
         world_id: String,
         enabled: bool,
     },
+    /// 打开或关掉剧情概览的自动整理；回执与世界观相同（WorldSettingsSaved），随后广播世界设定。
+    /// 不暂停世界，不核对设定修订号；关掉只停自动整理，实录照常追加，手动整理仍可用。
+    SetAutoSummary {
+        request_id: String,
+        world_id: String,
+        enabled: bool,
+    },
     /// 读录下的几卷（回 Recordings）
     GetRecordings,
     /// 删掉录完的一卷（正在录的删不了）；回执是 WorldSettingsSaved，随后广播录像列表。
@@ -360,6 +367,25 @@ pub enum ClientMsg {
     },
     /// 读导演会话与待触发事项（回 DirectorState）。
     GetDirectorState,
+    /// 读实时剧本：给 world_id 时核对是本局；after 是已看到的最后一个编号，before 是从它之前往前读；
+    /// 两个都不给时读最近一页。回 ManuscriptPage。
+    GetManuscript {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        world_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// 请剧本整理任务读最近的实录并生成一份新概览。不推进世界，也没有世界操作工具。
+    /// 世界和概览整理都没有新实录时不重复。mode 缺省是玩家手动整理，回执与结果回给发出者；
+    /// 自动整理只会在新增实录或阈值与关键事件条件满足时发起，结果广播给所有旁观页面。
+    SummarizeManuscript {
+        world_id: String,
+        request_id: String,
+    },
 }
 
 impl ClientMsg {
@@ -375,6 +401,7 @@ impl ClientMsg {
             | SetClimate { request_id, .. }
             | SetMiracles { request_id, .. }
             | SetRecording { request_id, .. }
+            | SetAutoSummary { request_id, .. }
             | DeleteRecording { request_id, .. }
             | SetStrangers { request_id, .. }
             | SetGameMode { request_id, .. }
@@ -402,7 +429,8 @@ impl ClientMsg {
             | GetNotebook { request_id, .. }
             | GetNotebookDetail { request_id, .. }
             | SetAgentLimits { request_id, .. }
-            | DirectorSay { request_id, .. } => Some(request_id),
+            | DirectorSay { request_id, .. }
+            | SummarizeManuscript { request_id, .. } => Some(request_id),
             JoinResident { op_id, .. } | GetResidentJoinResult { op_id, .. } => Some(op_id),
             AvatarInput { .. }
             | GetWorldSettings
@@ -418,6 +446,7 @@ impl ClientMsg {
             | PreviewResidentJoin { .. }
             | GetDiary { .. }
             | GetDirectorState
+            | GetManuscript { .. }
             | GetAgentLimits => None,
         }
     }

@@ -31,6 +31,8 @@ export function createDirectorPanel(deps: {
   save: (command: SaveCommand, receipt: Receipt) => void
   /** 当前世界标识，取自最近一份道具目录 */
   worldId: () => string | undefined
+  /** 打开时先收起别的同尺寸面板（实时剧本） */
+  onOpen?: () => void
 }) {
   /** 发出后还没收到回执的那条；回执的 ok 决定这条发没发出，失败时把原话放回输入框 */
   let sending: { text: string } | null = null
@@ -138,6 +140,7 @@ export function createDirectorPanel(deps: {
   let shown: unknown = null
 
   function setOpen(open: boolean) {
+    if (open && root.hidden) deps.onOpen?.()
     root.hidden = !open
     button.setAttribute('aria-pressed', String(open))
     if (open) {
@@ -255,6 +258,7 @@ export function createDirectorPanel(deps: {
           'read_content',
           'trace',
           'history',
+          'query_data',
           'world',
         ].includes(effect.tool)
     )

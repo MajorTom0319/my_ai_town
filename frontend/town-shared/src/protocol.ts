@@ -77,7 +77,45 @@ export type Alert =
   | { kind: 'critical' }
   | { kind: 'hold'; pause: PauseKind; reason: string; cause?: HoldCause; provider?: string }
 /** 世界日志一行的种类：出发与到达、模型请求台账，其余是世界里发生的事 */
-export type EventKind = 'world' | 'movement' | 'model'
+export type EventKind = 'world' | 'movement' | 'model' | 'director'
+/** 实时剧本的一条：世界确认过的台词、心声、动作结果和公开事件；只给玩家看，不写进村民记忆 */
+export interface ManuscriptEntry {
+  /** 世界内连续编号，从 1 开始；断线续读与去重都看它 */
+  seq: number
+  world_id: string
+  /** 模拟分钟；排序以它为准 */
+  sim_minutes: number
+  clock: string
+  /** choice 是已确认的玩法选择（登记、选票、天灾等），不等于动作已经做到 */
+  kind: 'speech' | 'thought' | 'action' | 'choice' | 'announcement' | 'world' | 'director'
+  /** 公开的进了世界或公开场合；私密的是私聊、心声、后台结果 */
+  visibility: 'public' | 'private'
+  tone: 'statement' | 'thought' | 'result' | 'announcement'
+  actor?: string
+  name?: string
+  locale?: string
+  /** 原文或世界确认的结果；心声是本人的自述 */
+  text: string
+  /** 这段私密内容属于谁；公开条目没有 */
+  about?: string[]
+  /** 来源编号：`chat:…`、`thought:…`、`action:…`、`event:…` */
+  source: string
+}
+export interface ManuscriptPage {
+  world_id: string
+  entries: ManuscriptEntry[]
+  /** 当前已写到的最大编号 */
+  cursor: number
+}
+/** 模型整理的剧情概览；conflicts、promises、questions 的第一项是判断，其余是能回去核对的条目编号 */
+export interface ManuscriptSummary {
+  through_seq: number
+  through_clock: string
+  situation: string
+  conflicts: string[][]
+  promises: string[][]
+  questions: string[][]
+}
 /** 日志说的是谁：编号与当时的名字 */
 export interface EventActor {
   id: string
@@ -89,6 +127,8 @@ export interface EventSpeech {
   seat?: number
   /** 说的话本身，不带场合和发言人 */
   text: string
+  /** 是否对众人公开；旧录像没有这一项，按公开处理 */
+  public?: boolean
 }
 /** 遇害：谁下的手、留下什么伤 */
 export interface Killing {
@@ -614,6 +654,8 @@ export interface WorldSettingsState {
   /** 录像开关：开着时把发生的事录进小镇目录，事后能重演、换角度拍素材。随存档保存，缺省为开；
    *  真的在录哪一卷看 recordings 消息的 live */
   recording: boolean
+  /** 剧情概览的自动整理开关：随存档保存，缺省为开；关掉时实录照常追加，手动整理仍可用 */
+  auto_summary: boolean
   /** 陌生环境：村民初来乍到，只知道到过的地方。随存档保存，缺省为关 */
   strangers: boolean
   /** 开着的玩法（如 'tide'）；没开时没有这一项。随存档保存 */
@@ -687,7 +729,8 @@ export interface TideNews {
   text: string
 }
 
-export type Survival10Phase = 'waiting' | 'day' | 'speech' | 'vote' | 'night' | 'jury' | 'over'
+export type Survival10Phase =
+  'waiting' | 'day' | 'gather' | 'speech' | 'vote' | 'last_words' | 'night' | 'jury' | 'over'
 export interface Survival10Seat {
   seat: number
   id: string
@@ -712,6 +755,7 @@ export interface Survival10Line {
 export interface Survival10Ballot {
   voter: number
   target?: number
+  automatic: boolean
 }
 export interface Survival10View {
   day: number
@@ -728,6 +772,8 @@ export interface Survival10View {
   revealed: boolean
   history: string[]
   winner?: number
+  farewells?: { seat: number; at: number; text: string; target?: number; skipped: boolean }[]
+  disasters?: { id: number; at: number; text: string; first_day?: number; last_day?: number }[]
 }
 export type WerewolfRole = 'wolf' | 'seer' | 'witch' | 'hunter' | 'guard' | 'villager'
 export type WerewolfPhase =
@@ -1016,6 +1062,22 @@ export type ServerMsg =
   | { type: 'agent_saved'; request_id: string; ok: boolean; message: string }
   | { type: 'director_reply'; entry: DirectorEntry }
   | { type: 'director_state'; state: DirectorState }
+  /** 实时剧本的最近一页或断线后补齐的一段；只回给发问的页面 */
+  | { type: 'manuscript_page'; page: ManuscriptPage }
+  /** 新写进剧本的条目，按编号顺序；没有新条目时不发 */
+  | { type: 'manuscript_append'; entries: ManuscriptEntry[] }
+  /**
+   * 刚生成的剧情概览；summary 为空表示还没有，error 说明这次为什么没更新。
+   * 手动请求的立即回执和最终结果带同一个 request_id；自动整理没有 request_id，
+   * 新结果 generated 为 true（广播给所有旁观页面）。
+   */
+  | {
+      type: 'manuscript_summary'
+      summary?: ManuscriptSummary | null
+      error?: string
+      request_id?: string
+      generated?: boolean
+    }
   /**
    * 通用错误：命令无法执行、格式错误、读取失败或保存失败。request_id 是引起错误的命令自带的编号
    * （加入小镇是操作编号）；周期存盘失败这类不是由命令引起的错误没有。
@@ -1149,6 +1211,8 @@ export type ClientMsg =
   | { type: 'set_climate'; request_id: string; world_id: string; climate: Climate }
   /** 打开或关掉录像：打开就开新的一卷，关掉就收起正在录的；回执同世界设定 */
   | { type: 'set_recording'; request_id: string; world_id: string; enabled: boolean }
+  /** 打开或关掉剧情概览的自动整理；回执是 world_settings_saved，随后广播世界设定 */
+  | { type: 'set_auto_summary'; request_id: string; world_id: string; enabled: boolean }
   | { type: 'get_recordings' }
   /** 删掉录完的一卷；正在录的删不了 */
   | { type: 'delete_recording'; request_id: string; world_id: string; reel: string }
@@ -1164,6 +1228,16 @@ export type ClientMsg =
   /** 导演：说一句，回 agent_saved 表示收到；结果随后以 director_reply 广播 */
   | { type: 'director_say'; request_id: string; world_id: string; text: string }
   | { type: 'get_director_state' }
+  /** 读实时剧本：带 world_id 时核对是本局；after 往后读，before 往前读旧记录，不给时读最近一页 */
+  | {
+      type: 'get_manuscript'
+      world_id?: string
+      after?: number
+      before?: number
+      limit?: number
+    }
+  /** 请剧本整理任务读新实录；没有世界操作工具，模型不可用时不影响世界 */
+  | { type: 'summarize_manuscript'; world_id: string; request_id: string }
   | {
       type: 'validate_prop' | 'save_prop'
       request_id: string

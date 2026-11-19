@@ -11,6 +11,8 @@ export interface GameMenuDeps {
   openResidents: () => void
   /** 世界导演面板 */
   openDirector: () => void
+  /** 实时剧本面板 */
+  openManuscript: () => void
   help: { openGuide: () => void; resetTips: () => void }
   /** 打开前停下化身：按着的方向键松开 */
   onOpen: () => void
@@ -27,7 +29,8 @@ function somethingOpen() {
     document.documentElement.classList.contains('avatar-controlling') ||
     !!active?.matches('input, textarea, select, [contenteditable="true"]') ||
     $('open-props').getAttribute('aria-pressed') === 'true' ||
-    $('open-director').getAttribute('aria-pressed') === 'true'
+    $('open-director').getAttribute('aria-pressed') === 'true' ||
+    $('open-manuscript').getAttribute('aria-pressed') === 'true'
   )
 }
 
@@ -86,6 +89,7 @@ export function createGameMenu(deps: GameMenuDeps) {
   $('menu-town').onclick = deps.openTown
   $('menu-residents').onclick = deps.openResidents
   $('menu-director').onclick = deps.openDirector
+  $('menu-manuscript').onclick = deps.openManuscript
   $('open-help').onclick = () => {
     grid.hidden = true
     helpBox.hidden = false

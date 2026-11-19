@@ -431,7 +431,45 @@ pub fn server_samples() -> Vec<ServerMsg> {
         ],
         error: None,
     };
+    let manuscript_entry = ManuscriptEntry {
+        seq: 12,
+        world_id: "w1".into(),
+        sim_minutes: 432.5,
+        clock: "D1 07:12".into(),
+        kind: ManuscriptKind::Speech,
+        visibility: ManuscriptVisibility::Private,
+        tone: ManuscriptTone::Statement,
+        actor: Some("resident_ashu".into()),
+        name: Some("阿树".into()),
+        locale: Some("cafe".into()),
+        text: "明天图书馆会关闭。".into(),
+        about: vec!["resident_ashu".into(), "resident_he".into()],
+        source: "chat:chat1:3".into(),
+    };
     vec![
+        ServerMsg::ManuscriptPage {
+            page: ManuscriptPage {
+                world_id: "w1".into(),
+                entries: vec![manuscript_entry.clone()],
+                cursor: 12,
+            },
+        },
+        ServerMsg::ManuscriptAppend {
+            entries: vec![manuscript_entry],
+        },
+        ServerMsg::ManuscriptSummary {
+            summary: Some(ManuscriptSummary {
+                through_seq: 12,
+                through_clock: "D1 07:12".into(),
+                situation: "公告说图书馆明天关闭，阿树把这件事告诉了在场的人。".into(),
+                conflicts: vec![vec!["阿树想最后再借一本书".into(), "12".into()]],
+                promises: vec![],
+                questions: vec![vec!["公告是否已经送达其他人".into(), "12".into()]],
+            }),
+            error: None,
+            request_id: None,
+            generated: true,
+        },
         ServerMsg::DirectorReply {
             entry: DirectorEntry {
                 effects: vec![],
@@ -549,6 +587,7 @@ pub fn server_samples() -> Vec<ServerMsg> {
                 provider: "p".into(),
                 ready: true,
                 recording: true,
+                auto_summary: true,
                 revision: 1,
                 strangers: true,
                 world_id: "w1".into(),
@@ -1473,6 +1512,7 @@ pub fn shape_samples() -> (Vec<ServerMsg>, Vec<ClientMsg>) {
                         occasion: "狼人频道".into(),
                         seat: Some(2),
                         text: "刀 1 号阿树，天亮前别露口风。（选 1 号 阿树）".into(),
+                        public: false,
                     },
                 ),
             },
@@ -1681,6 +1721,11 @@ pub fn client_samples() -> Vec<ClientMsg> {
             enabled: false,
         },
         ClientMsg::GetRecordings,
+        ClientMsg::SetAutoSummary {
+            request_id: "summary-switch-1".into(),
+            world_id: "w1".into(),
+            enabled: false,
+        },
         ClientMsg::DeleteRecording {
             request_id: "rec-2".into(),
             world_id: "w1".into(),
@@ -1707,6 +1752,16 @@ pub fn client_samples() -> Vec<ClientMsg> {
         },
         ClientMsg::GetProps,
         ClientMsg::GetDirectorState,
+        ClientMsg::GetManuscript {
+            world_id: Some("w1".into()),
+            after: Some(4),
+            before: None,
+            limit: Some(100),
+        },
+        ClientMsg::SummarizeManuscript {
+            world_id: "w1".into(),
+            request_id: "m1".into(),
+        },
         ClientMsg::DirectorSay {
             request_id: "d1".into(),
             world_id: "w1".into(),

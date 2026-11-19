@@ -22,7 +22,7 @@ pub(crate) struct Runtime {
     pub avatar_control: crate::avatar::Control,
     pub world_settings: host::world_settings::WorldSettings,
     pub world: World,
-    /// 玩家选定的速度：正常速度（见 base_pace）的倍数，0 为暂停，界面上只有 0 和 1；随存档保存。
+    /// 玩家选定的速度：正常速度（见 base_pace）的倍数，0 为暂停，界面允许输入自定义倍数；随存档保存。
     pub speed: f64,
     /// 这一拍实际的推进速度（模拟分钟 / 现实秒）：大家都在做一件还要好一阵的事时比正常速度快
     /// （自动快进），不存档。
@@ -41,14 +41,31 @@ pub(crate) struct Runtime {
     pub tape: host::recording::Tape,
     /// 开新一卷录像要的小镇目录与地图；世界不存档时为空
     pub reels: Option<crate::recording_commands::ReelSource>,
+    /// 实时剧本：世界确认的台词、心声和结果按世界追加到小镇目录，并增量广播。
+    pub manuscript: crate::manuscript::Manuscript,
+    /// 小镇目录；不存档时为空
+    pub manuscript_root: Option<std::path::PathBuf>,
     /// 导演会话与在途轮次。
     pub director: crate::conductor::Director,
     /// 导演模型请求单独一个池：村民忙的时候输入框也能用。
     pub director_tasks: TaskPool,
     /// 这一拍要广播的导演轮次。
     pub director_outbox: Vec<protocol::DirectorEntry>,
+    /// 上一拍写进剧本、还没广播的条目：导演这一轮失败撤回时，页面不该先看到裁判全知结果。
+    pub manuscript_pending: Vec<protocol::ManuscriptEntry>,
+    /// 剧情概览的整理任务：一次只发一个，不碰世界。请求发生在模型池里，结果下一拍收回。
+    pub summary_state: crate::manuscript::SummaryState,
+    /// 自动整理的节流：下一次允许开始的现实时刻与那次开始时写到的编号。
+    /// 记录没变、或离上次开始太近时都不再调用模型；手动整理不受它影响。
+    pub summary_wait: std::time::Instant,
+    /// 自动整理的门槛：攒够这么多条新实录就整理一次；固定回复测试里调小，免得跑很多模拟分钟。
+    pub summary_batch: usize,
+    /// 自动整理后至少等这么久才能再发起，避免快进时连续调用模型。
+    pub auto_summary_gap: std::time::Duration,
+    /// 导演事务里产生的世界日志，这一拍收尾时一起进剧本。
+    pub director_events: Vec<kernel::Event>,
     /// 最近的世界日志，导演每轮看到的那一段。
-    pub director_recent: std::collections::VecDeque<(String, String)>,
+    pub director_recent: std::collections::VecDeque<(f64, String)>,
     /// 这一拍收过导演轮次，存档时带上会话。
     pub director_pending_persist: bool,
     /// 导演放的或移除的道具，这一拍结束要广播道具目录。
@@ -111,6 +128,163 @@ pub(crate) fn error_msg(message: String) -> ServerMsg {
 }
 
 impl Runtime {
+    /// 剧情概览：把新实录交给单独的整理任务。任务没有工具，也不能改世界；模型不可用时只回错误。
+    /// 立即回执和稍后回来的结果都带着这次请求的编号，页面据此配对，不把自动整理当成自己的。
+    fn summarize_manuscript(&mut self, world_id: &str, request_id: &str) -> Outcome {
+        let current = self.manuscript.summary().cloned();
+        let reply = |error: Option<String>| {
+            Outcome::reply(ServerMsg::ManuscriptSummary {
+                summary: current.clone(),
+                error,
+                request_id: Some(request_id.to_owned()),
+                generated: false,
+            })
+        };
+        if world_id != self.population.world_id {
+            return reply(Some("世界已重置，请刷新页面后重试".into()));
+        }
+        if self.summary_state.busy() {
+            return reply(Some("剧情概览正在整理，稍等一下".into()));
+        }
+        let entries = self.manuscript.summary_lines(self.manuscript.summary());
+        let Ok((prompt, through)) =
+            crate::manuscript::summary_prompt(&entries, self.manuscript.summary())
+        else {
+            // 在途的自动整理已经把这段记进概览时，手动请求没有新素材；
+            // 这不是失败，不该用错误回执把已经生效的概览标成未更新。
+            if self.manuscript.summary().is_some() {
+                return reply(None);
+            }
+            return reply(Some("还没有可整理的实录".into()));
+        };
+        match self.start_summary(prompt, through, Some(request_id.to_owned())) {
+            Ok(()) => Outcome::reply(ServerMsg::ManuscriptSummary {
+                summary: self.manuscript.summary().cloned(),
+                error: None,
+                request_id: Some(request_id.to_owned()),
+                generated: false,
+            }),
+            Err(error) => reply(Some(error.into())),
+        }
+    }
+
+    /// 发起一次概览整理（手动和自动共用）；模型不可用、任务池满时返回原因，不阻塞世界。
+    fn start_summary(
+        &mut self,
+        prompt: String,
+        through: u64,
+        request_id: Option<String>,
+    ) -> Result<(), &'static str> {
+        let mock = matches!(self.mode, crate::startup::Mode::MockLlm { .. });
+        let target = if mock {
+            host::llm::LlmTarget::default()
+        } else {
+            let Some(target) = crate::settings::active_target(&self.settings) else {
+                return Err("还没有可用的工具模型，请先在设定里选中一个");
+            };
+            target
+        };
+        let body = crate::manuscript::summary_body(&target.model, &prompt);
+        self.summary_state.start(
+            &self.tasks,
+            crate::manuscript::SummaryJob {
+                world: self.population.world_id.clone(),
+                through,
+                target,
+                body,
+                mock,
+                request_id,
+            },
+        )
+    }
+
+    fn poll_manuscript_summary(&mut self, clients: &Clients) {
+        let Some(result) = self.summary_state.poll(&self.population.world_id) else {
+            return;
+        };
+        let request_id = result.request_id;
+        let automatic = request_id.is_none();
+        if automatic {
+            self.manuscript.finish_auto();
+        }
+        let message = match result.reply.and_then(|text| {
+            let response = serde_json::json!({"choices":[{"message":{"content":text}}]});
+            crate::manuscript::parse_summary(&response)
+        }) {
+            Ok((situation, conflicts, promises, questions)) => ServerMsg::ManuscriptSummary {
+                summary: self.manuscript.summarize(
+                    situation,
+                    conflicts,
+                    promises,
+                    questions,
+                    result.through,
+                ),
+                error: None,
+                request_id: request_id.clone(),
+                generated: true,
+            },
+            Err(error) => {
+                if automatic {
+                    self.manuscript.retry_auto();
+                    self.summary_wait =
+                        std::time::Instant::now() + std::time::Duration::from_secs(30);
+                }
+                // 失败只回原因；上一版概览留在 Manuscript 里，不能拿一个错误的空 summary 把它盖掉。
+                let error = format!("概览暂未更新：{error}");
+                // 自动整理失败只记日志，不把技术错误推给正在读剧本的旁观页面。
+                if request_id.is_none() {
+                    eprintln!("[host] 自动整理{error}");
+                    return;
+                }
+                ServerMsg::ManuscriptSummary {
+                    summary: self.manuscript.summary().cloned(),
+                    error: Some(error),
+                    request_id,
+                    generated: false,
+                }
+            }
+        };
+        broadcast(clients, &message);
+    }
+
+    /// 自动整理：只在世界产生了新实录时，现实时间节流后发起；同一世界一次只发一个请求。
+    /// 模型不可用或失败只记日志、等一会儿再试，不暂停世界，也不影响村民的决策。
+    fn auto_summarize_manuscript(&mut self) {
+        const RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+        // 关掉录像的世界不保存剧本文本，也不该为它多调一次模型。
+        if !self.world_settings.recording || !self.world_settings.auto_summary {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let through = self.manuscript.summarized_through().unwrap_or(0);
+        // 对话、投票这类玩法事实可能不经世界日志；新条目要先过一段，免得每走一步就调模型。
+        let due = self.manuscript.auto_due(through, self.summary_batch);
+        // 另一个整理（手动或自动）还在时也不排队，更不把这一批记成已整理。
+        if self.summary_state.busy() || now < self.summary_wait {
+            return;
+        }
+        if !due {
+            return;
+        }
+        let entries = self.manuscript.summary_lines(self.manuscript.summary());
+        let Ok((prompt, through)) =
+            crate::manuscript::summary_prompt(&entries, self.manuscript.summary())
+        else {
+            return;
+        };
+        match self.start_summary(prompt, through, None) {
+            Ok(()) => {
+                self.manuscript.accepted_auto();
+                self.summary_wait = now + self.auto_summary_gap;
+            }
+            Err(error) => {
+                self.manuscript.retry_auto();
+                self.summary_wait = now + RETRY;
+                eprintln!("[host] 自动整理剧情概览暂未开始：{error}");
+            }
+        }
+    }
+
     /// 执行一条来自 `connection` 的命令：回执、查询结果与错误只发给它，状态变化广播给所有连接。
     pub(crate) fn command(&mut self, connection: u64, msg: ClientMsg, clients: &Clients) {
         let request_id = msg.request_id().map(str::to_owned);
@@ -178,10 +352,17 @@ impl Runtime {
             | ClientMsg::SetRecording { request_id, .. }
             | ClientMsg::DeleteRecording { request_id, .. }
             | ClientMsg::SetStrangers { request_id, .. }
-            | ClientMsg::SetGameMode { request_id, .. } => ServerMsg::WorldSettingsSaved {
+            | ClientMsg::SetGameMode { request_id, .. }
+            | ClientMsg::SetAutoSummary { request_id, .. } => ServerMsg::WorldSettingsSaved {
                 request_id: request_id.clone(),
                 ok: false,
                 message,
+            },
+            ClientMsg::SummarizeManuscript { request_id, .. } => ServerMsg::ManuscriptSummary {
+                summary: self.manuscript.summary().cloned(),
+                error: Some(message),
+                request_id: Some(request_id.clone()),
+                generated: false,
             },
             ClientMsg::Content { request_id, .. }
             | ClientMsg::RemoveProp { request_id, .. }
@@ -225,6 +406,7 @@ impl Runtime {
             ClientMsg::Avatar { .. }
             | ClientMsg::AvatarInput { .. }
             | ClientMsg::GetChatHistory { .. }
+            | ClientMsg::GetManuscript { .. }
             | ClientMsg::GetWorldSettings
             | ClientMsg::GetRecordings
             | ClientMsg::GetProps
@@ -278,6 +460,10 @@ impl Runtime {
     fn dispatch(&mut self, msg: ClientMsg, connection: u64, clients: &Clients) -> Outcome {
         use ClientMsg::*;
         match msg {
+            SummarizeManuscript {
+                world_id,
+                request_id,
+            } => self.summarize_manuscript(&world_id, &request_id),
             SetWeather {
                 request_id,
                 expected_revision,
@@ -326,6 +512,11 @@ impl Runtime {
                 enabled,
                 ..
             } => self.save_recording(request_id, enabled),
+            SetAutoSummary {
+                request_id,
+                enabled,
+                ..
+            } => self.save_auto_summary(request_id, enabled),
             GetRecordings => Outcome::reply(self.recordings_msg()),
             DeleteRecording {
                 request_id, reel, ..
@@ -488,6 +679,21 @@ impl Runtime {
             } => self.notebook_detail(resident, request_id, &query),
             DirectorSay { .. } => unreachable!("导演指令在 command 里先处理"),
             GetDirectorState => self.director_state(),
+            GetManuscript {
+                world_id,
+                after,
+                before,
+                limit,
+            } => {
+                if world_id
+                    .as_ref()
+                    .is_some_and(|id| id != &self.population.world_id)
+                {
+                    Outcome::reply(error_msg("世界已重置，请刷新页面后重试".into()))
+                } else {
+                    Outcome::reply(self.manuscript.message(after, before, limit))
+                }
+            }
             GetAgentLimits => Outcome::reply(self.driver.limits_view(&self.world)),
             GetUsage => Outcome::reply(self.driver.usage_view(&self.world)),
             SetAgentLimits { request_id, limits } => self.set_agent_limits(request_id, limits),
@@ -515,7 +721,7 @@ impl Runtime {
             }
         }
         self.speed = speed;
-        println!("[host] speed = {speed} 模拟分钟/秒");
+        println!("[host] speed = {speed} 倍");
         Outcome::none().persisted()
     }
 
@@ -554,6 +760,18 @@ impl Runtime {
             return Outcome::reply(error_msg(message));
         }
         println!("[host] 世界已重置：{}，已暂停", self.world.clock());
+        // 新世界另开一份剧本流水；旧世界的目录原样保留。
+        self.summary_state.cancel();
+        self.summary_wait = std::time::Instant::now();
+        // 上一世界还没广播的条目必须跟着旧剧本收起，不能作为新世界的第一场戏发出去。
+        self.manuscript_pending.clear();
+        let root = self.manuscript_root.clone();
+        if let Err(error) = self
+            .manuscript
+            .bind(root.as_deref(), &self.population.world_id)
+        {
+            eprintln!("[host] 重置后打开新剧本失败：{error}");
+        }
         // 重置后是新的世界：上一卷录像收起，开新的一卷
         if self.world_settings.recording {
             if let Err(error) = self.start_reel() {
@@ -572,7 +790,16 @@ impl Runtime {
     /// 一拍：推进世界、收模型结果、发新请求、广播 roster。存盘或轨迹写入失败只写日志，不中断运行。
     pub(crate) fn tick(&mut self, clients: &Clients) {
         self.director_tick();
+        let directed = std::mem::take(&mut self.director_events);
+        self.manuscript_world_events(&directed);
+        self.note_director_events(directed);
         self.avatar_tick(clients);
+        // 上一拍确认的实录现在才广播；本拍若撤回导演改动，它刚报出的条目还留在缓冲里，不会外泄。
+        let earlier = std::mem::take(&mut self.manuscript_pending);
+        crate::manuscript::Manuscript::broadcast(clients, earlier);
+        // 化身命令等在这拍开头报出的世界日志：本拍收进剧本，末了再广播。
+        self.manuscript_pending
+            .extend(self.manuscript.drain(&mut self.world));
         let content_before = self.world.contents().revision();
         let inventory_before = self.world.inventory().revision();
         let missing = self.driver.missing_models(&self.population, &self.settings);
@@ -587,6 +814,7 @@ impl Runtime {
         } else {
             Vec::new()
         };
+        self.manuscript_world_events(&events);
         self.note_director_events(events);
         self.director_run_scheduled();
         let replied = match self.driver.receive(&mut self.world, clients) {
@@ -623,6 +851,10 @@ impl Runtime {
         if inventory_before != self.world.inventory().revision() {
             broadcast(clients, &self.props_message());
         }
+        self.poll_manuscript_summary(clients);
+        self.manuscript_pending
+            .extend(self.manuscript.drain(&mut self.world));
+        self.auto_summarize_manuscript();
         broadcast(clients, &self.roster());
         self.avatar_publish(clients);
         self.flush_director(clients);
@@ -771,6 +1003,29 @@ fn kept_in_memory(error: &HostError) -> String {
     format!("保存失败，内存状态保留，下次检查点重试：{error}")
 }
 
+impl Runtime {
+    /// 这一拍内核推进出来的世界日志：公告、导演操作和其他公开发生的事进剧本。
+    /// 带「一段话」标记的台词已由内核单报，这里跳过。
+    fn manuscript_world_events(&mut self, events: &[kernel::Event]) {
+        for event in events {
+            let kernel::Event::Log {
+                minutes,
+                text,
+                info,
+            } = event;
+            self.manuscript.ingest_event(info, *minutes, text);
+        }
+    }
+
+    /// 命令、加入居民等路径产生的世界日志不在 tick 里：先收进剧本，再随其他状态一起发给页面。
+    pub(crate) fn dispatch_world_events(&mut self, events: Vec<kernel::Event>, clients: &Clients) {
+        self.manuscript_world_events(&events);
+        let fresh = self.manuscript.drain(&mut self.world);
+        crate::manuscript::Manuscript::broadcast(clients, fresh);
+        self.driver.dispatch(&self.world, events, clients);
+    }
+}
+
 pub(crate) fn event(world: &World, text: &str) -> ServerMsg {
     ServerMsg::Event {
         sim_minutes: world.minutes(),
@@ -790,6 +1045,7 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::SetMiracles { world_id, .. }
         | ClientMsg::SetClimate { world_id, .. }
         | ClientMsg::SetRecording { world_id, .. }
+        | ClientMsg::SetAutoSummary { world_id, .. }
         | ClientMsg::DeleteRecording { world_id, .. }
         | ClientMsg::SetStrangers { world_id, .. }
         | ClientMsg::SetGameMode { world_id, .. }
@@ -806,7 +1062,9 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         ClientMsg::Avatar { .. }
         | ClientMsg::AvatarInput { .. }
         | ClientMsg::GetResidentJoinResult { .. } => None,
+        ClientMsg::SummarizeManuscript { world_id, .. } => Some(world_id),
         ClientMsg::GetChatHistory { .. }
+        | ClientMsg::GetManuscript { .. }
         | ClientMsg::GetWorldSettings
         | ClientMsg::GetRecordings
         | ClientMsg::GetProps
@@ -862,6 +1120,7 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::SetMiracles { .. }
         | ClientMsg::SetClimate { .. }
         | ClientMsg::SetRecording { .. }
+        | ClientMsg::SetAutoSummary { .. }
         | ClientMsg::GetRecordings
         | ClientMsg::DeleteRecording { .. }
         | ClientMsg::SetStrangers { .. }
@@ -895,6 +1154,8 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::GetNotebook { .. }
         | ClientMsg::GetNotebookDetail { .. }
         | ClientMsg::GetAgentLimits
+        | ClientMsg::GetManuscript { .. }
+        | ClientMsg::SummarizeManuscript { .. }
         | ClientMsg::SetAgentLimits { .. } => false,
     }
 }

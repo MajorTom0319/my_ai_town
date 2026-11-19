@@ -84,6 +84,23 @@ pub fn finish(w: &mut World, actor: &str, id: &str) -> ActionResult {
     panic!("动作未结束：{:?}", w.action_group(actor, id));
 }
 
+/// 只推进一个人身上的动作组直到结束：世界照常走时间、别人也照常活着，但玩家手里的人不会向模型要下一步。
+/// 用在要确认动作回执写进剧本这类测试里。
+pub fn finish_player_group(w: &mut World, actor: &str, id: &str) -> ActionResult {
+    for _ in 0..4000 {
+        let group = w.action_group(actor, id).unwrap();
+        if let Some(result) = group
+            .results
+            .first()
+            .filter(|_| group.status != GroupStatus::Running)
+        {
+            return result.clone();
+        }
+        w.step(0.1);
+    }
+    panic!("动作未结束：{:?}", w.action_group(actor, id));
+}
+
 /// 存档再读进一个同样拓扑的新世界。
 pub fn restore(w: &World, mut fresh: World) -> World {
     let save = serde_json::to_string(&w.snapshot()).unwrap();

@@ -146,6 +146,7 @@ impl World {
         candidate.miracles = snapshot.miracles;
         candidate.strangers = snapshot.strangers;
         candidate.game_mode = snapshot.game_mode.clone();
+        candidate.restore_game_mode();
         candidate.concealed = snapshot.concealed.clone();
         if let Some(map) = candidate.walk_map.as_deref() {
             for a in snapshot.actors.values_mut() {

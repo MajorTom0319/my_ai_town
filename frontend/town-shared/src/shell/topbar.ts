@@ -1,7 +1,7 @@
 // 地图左上的时钟牌和开始/暂停钮、菜单里的「选择小镇」、时钟牌下的连接状态和全镇暂停标记，以及地图底部正中
 // 那排格子（道具、进入化身、书报）和左下角让开它的动态。
 // 以前这些在顶栏上，现在顶栏拆了，都浮在地图上（shell/plain.html、shell/hud.css）。
-import { $, button } from '../dom'
+import { $, button, el } from '../dom'
 import { isCompact } from '../platform'
 import { countBadge } from '../design/ui'
 import type { EventsHandle } from '../events'
@@ -17,8 +17,10 @@ import { newId } from '../ids'
 
 /** 点了开始或暂停以后，最多等这么久（毫秒）让名册跟上；还没跟上就以名册为准（命令被拦下、没生效） */
 const CONFIRM_MS = 3000
+/** 服务端 `SPEED_RANGE` 的上限是模拟分钟/现实秒，不随地图的正常速度变；这里输入的是相对倍数。 */
+const MAX_SPEED = 600
 
-/** 时钟牌旁边的开始/暂停钮。世界只有暂停和运行两档，运行时村民在画面上像散步（正常速度由服务端按地图比例定）；
+/** 时钟牌旁边的开始/暂停与倍速钮。1× 时村民在画面上像散步（正常速度由服务端按地图比例定）；
  *  大家都在做一件还要好一阵的事、没人走动或说话时服务端自动快进（名册的 pace 比 speed 大），
  *  快进的提示挂在地图上（pauseHint.ts）。
  *  点了先在本地记住新速度：紧接着进设定时，记下的是新速度而不是上一拍名册里的。
@@ -30,16 +32,72 @@ export function installSpeedBar(
   /** 运行时的世界速度 */
   normalSpeed: number
 ) {
+  let selectedSpeed = normalSpeed
   const toggle = button('', () => (marked ? choose(0) : start()), 'speed-toggle')
   // 暂停时绿底白色三角，运行时白底两道；只画图标，说法放在悬停提示和读屏文字里
   const icon = pixelIcon('play')
   toggle.append(icon)
-  $('speeds').replaceChildren(toggle)
+  const editor = el('dialog', '', 'speed-editor')
+  const form = el('form')
+  const heading = el('h2', '世界时间流速')
+  const label = el('label', '倍数')
+  const input = el('input')
+  input.type = 'number'
+  input.min = '0.01'
+  input.max = String(MAX_SPEED / normalSpeed)
+  input.step = 'any'
+  input.required = true
+  input.inputMode = 'decimal'
+  label.append(input)
+  const help = el(
+    'p',
+    `请输入 0.01–${input.max}，支持小数，例如 0.5、2、8。倍速不加快模型响应，也不绕过安全停表。`
+  )
+  const actions = el('div', '', 'speed-editor-actions')
+  const cancel = button('取消', () => editor.close())
+  const confirm = button('应用并运行', () => {})
+  confirm.type = 'submit'
+  actions.append(cancel, confirm)
+  form.append(heading, label, help, actions)
+  editor.append(form)
+  document.body.append(editor)
+  const rate = button(
+    '',
+    () => {
+      input.value = String(selectedSpeed / normalSpeed)
+      input.setCustomValidity('')
+      editor.showModal()
+      input.focus()
+      input.select()
+    },
+    'speed-rate'
+  )
+  rate.setAttribute('aria-haspopup', 'dialog')
+  rate.disabled = true
+  input.addEventListener('input', () => input.setCustomValidity(''))
+  form.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const multiplier = Number(input.value)
+    const speed = multiplier * normalSpeed
+    if (!Number.isFinite(speed) || multiplier < 0.01 || speed > MAX_SPEED) {
+      input.setCustomValidity(`请输入 0.01–${input.max} 之间的有效倍数`)
+      input.reportValidity()
+      return
+    }
+    if (rate.disabled) return
+    editor.close()
+    start(speed)
+  })
+  $('speeds').replaceChildren(toggle, rate)
   function render(running: boolean) {
     setPixelIcon(icon, running ? 'pause' : 'play')
     toggle.setAttribute('aria-label', running ? '暂停' : '开始')
     toggle.title = running ? '暂停世界（空格）' : '开始运行（空格）；没人走动或说话时会自动快进'
     toggle.classList.toggle('go', !running)
+    const multiplier = selectedSpeed / normalSpeed
+    rate.textContent = `${multiplier}×`
+    rate.title = `当前 ${multiplier} 倍时间流速，点击输入倍数（相对本玩法正常速度）`
+    rate.setAttribute('aria-label', `调整时间流速，当前 ${multiplier} 倍`)
   }
   // 名册来之前先画成暂停、不能点；世界设好并连上后由 worldSettings.ts 放开
   render(false)
@@ -63,8 +121,8 @@ export function installSpeedBar(
   /** 「开始」前的拦截（还没连模型时先请玩家连上）：接手了返回 true，由它决定之后要不要开始 */
   let gate: ((start: () => void) => boolean) | null = null
   /** 玩家点「开始」或按空格：先问拦截。返回是否已经开始 */
-  function start() {
-    const go = () => choose(normalSpeed)
+  function start(speed = selectedSpeed) {
+    const go = () => choose(speed)
     if (gate?.(go)) return false
     go()
     return true
@@ -75,6 +133,7 @@ export function installSpeedBar(
   function mark(speed: number) {
     if (marked === speed) return
     marked = speed
+    if (speed > 0) selectedSpeed = speed
     render(speed > 0)
     for (const listener of listeners) listener(speed)
   }

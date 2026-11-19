@@ -39,6 +39,9 @@
 .hud-flags > * {
   pointer-events: auto;
 }
+.hud-row {
+  flex-wrap: wrap;
+}
 /* 头像条排在这一列里，跟着上面的提示往下让；化身时头像条藏起来，时钟牌和开始钮还在 */
 #hud-left > .resident-strip {
   position: static;
@@ -115,6 +118,55 @@
 /* 开始/暂停：暂停时绿底白色三角，运行时白底黑色两道 */
 #speeds {
   display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.speed-rate {
+  min-width: 40px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--hud-line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--hud-shadow);
+  font-size: 14px;
+  font-weight: 600;
+}
+.speed-rate:hover:not(:disabled) {
+  background: var(--surface-sunken);
+}
+.speed-editor {
+  width: min(360px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid var(--hud-line);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--hud-shadow-big);
+}
+.speed-editor::backdrop {
+  background: rgb(20 24 22 / 0.35);
+}
+.speed-editor h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+}
+.speed-editor label {
+  display: grid;
+  gap: 8px;
+}
+.speed-editor input {
+  width: 100%;
+}
+.speed-editor p {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.speed-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .speed-toggle {
   display: grid;

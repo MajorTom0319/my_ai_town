@@ -276,6 +276,12 @@ impl World {
         check_pair_here(self, actor, partner, &kind)?;
         self.interactions.check_new_offer(actor, partner, &kind)?;
         let duration_minutes = check_kind(self, actor, partner, &kind)?;
+        if kind.has_chat() {
+            ensure!(
+                self.game_mode_allows_chat(actor) && self.game_mode_allows_chat(partner),
+                KernelError::interaction("正在执行当前工作或玩法行动，不能开始交谈")
+            );
+        }
         let place = self.player_pair_place(actor, partner, &kind);
         let mut item = Interactions::new_offer(
             command_id,
@@ -404,6 +410,10 @@ impl World {
             ensure!(
                 self.talk_available(actor) && self.talk_available(&old.initiator),
                 KernelError::interaction("双方须能够回应，并先结束已有的共同互动")
+            );
+            ensure!(
+                self.game_mode_allows_chat(actor) && self.game_mode_allows_chat(&old.initiator),
+                KernelError::interaction("正在执行当前工作或玩法行动，不能开始交谈")
             );
         } else if !matches!(old.kind, InteractionKind::Appointment { .. }) {
             // 约定答应了照常活动，不要求空闲

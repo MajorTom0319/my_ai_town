@@ -78,6 +78,9 @@ fn server_variants() -> Vec<String> {
         JoinResult,
         DirectorReply,
         DirectorState,
+        ManuscriptPage,
+        ManuscriptAppend,
+        ManuscriptSummary,
     })
 }
 
@@ -94,6 +97,7 @@ fn client_variants() -> Vec<String> {
         SetMiracles,
         SetRecording,
         GetRecordings,
+        SetAutoSummary,
         DeleteRecording,
         SetStrangers,
         SetGameMode,
@@ -136,6 +140,8 @@ fn client_variants() -> Vec<String> {
         SetAgentLimits,
         DirectorSay,
         GetDirectorState,
+        GetManuscript,
+        SummarizeManuscript,
     })
 }
 

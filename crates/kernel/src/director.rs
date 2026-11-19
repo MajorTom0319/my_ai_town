@@ -20,6 +20,54 @@ const TEXT_MAX_CHARS: usize = 800;
 const PENDING_MAX: usize = 200;
 
 impl World {
+    pub fn director_adjust_supply(
+        &mut self,
+        id: &str,
+        action: Option<&str>,
+        adjustment: crate::props::SupplyAdjustment,
+        reason: &str,
+    ) -> Result<(String, u32, u32)> {
+        let reason = valid_text(reason)?;
+        let prop = self
+            .topo
+            .prop(id)
+            .filter(|prop| !prop.withdrawn && self.inventory.on_map(&self.props, id))
+            .ok_or_else(|| KernelError::action("道具不存在或不在地图上"))?;
+        let mut supplies = prop
+            .verbs
+            .iter()
+            .filter_map(|verb| verb.action.as_ref())
+            .filter(|supply| {
+                supply.supply.is_some() && action.is_none_or(|action| action == supply.id)
+            });
+        let supply = supplies
+            .next()
+            .cloned()
+            .ok_or_else(|| KernelError::action("道具没有对应的有限库存动作"))?;
+        ensure!(
+            supplies.next().is_none(),
+            KernelError::action("道具有多个库存动作，请指定 action")
+        );
+        let (before, after) = if supply.mode_managed {
+            self.game_mode_adjust_supply(id, &supply.id, adjustment, &reason)?
+                .ok_or_else(|| KernelError::action("该库存由玩法管理，不允许直接修改展示量"))?
+        } else {
+            let before = self
+                .props
+                .supply_remaining(id, &supply)
+                .expect("上面已确认有限库存");
+            let after = adjustment.apply(before)?;
+            ensure!(
+                after <= supply.supply.as_ref().expect("上面已确认有限库存").initial,
+                KernelError::action("普通道具库存不能超过初始容量")
+            );
+            self.props.set_supply(id, &supply.id, after);
+            self.inventory.bump();
+            (before, after)
+        };
+        Ok((supply.id, before, after))
+    }
+
     /// 现在告诉在场（给定了地点时只告诉那里的）村民一件事。
     pub fn director_announce(&mut self, text: &str, locale: Option<&str>) -> Result<()> {
         let text = valid_text(text)?;

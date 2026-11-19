@@ -48,6 +48,9 @@ pub struct Actor {
     /// 找到过、亲眼看见被藏起来的东西（道具编号）。
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub found: BTreeSet<String>,
+    /// 这一拍新报的剧本事实（world.rs 的 manuscript_outbox 收走），不存档，也不进观察。
+    #[serde(skip)]
+    pub(crate) manuscript_outbox: Option<Vec<crate::world::ManuscriptFact>>,
 }
 
 impl Actor {
@@ -74,6 +77,7 @@ impl Actor {
             lost: vec![],
             places_known: Default::default(),
             found: Default::default(),
+            manuscript_outbox: None,
         }
     }
 

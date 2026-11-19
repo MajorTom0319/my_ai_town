@@ -13,6 +13,8 @@ use std::{
 use tungstenite::{Message, WebSocket};
 
 const WAIT: Duration = Duration::from_secs(8);
+/// 等世界跑出一段新剧情这类慢结果时的上限；单条消息仍按 WAIT 等。
+pub const LONG_WAIT: Duration = Duration::from_secs(20);
 
 /// 起子进程时串行：并行的用例会选到同一个临时端口；子进程创建时还会短暂继承本进程打开的文件，
 /// 在进程内开关存档锁的用例要拿着它，否则刚关掉的锁可能还挂在子进程上。
@@ -394,6 +396,19 @@ pub fn join_id(ws: &mut WebSocket<TcpStream>, template_id: &str) -> String {
     let outcome = join(ws, template_id, None);
     assert_eq!(outcome["ok"], true, "{outcome}");
     outcome["resident_id"].as_str().unwrap().to_string()
+}
+
+/// 用正式模型夹具的用例只需要写好的回复：关掉录像和自动整理，不让概览整理多占一次请求。
+pub fn text_only_world(ws: &mut WebSocket<TcpStream>) {
+    let state = reply(ws, json!({"type":"get_world_settings"}), "world_settings")["state"].clone();
+    for (kind, enabled) in [("set_recording", false), ("set_auto_summary", false)] {
+        let receipt = reply(
+            ws,
+            json!({"type":kind,"request_id":kind,"world_id":state["world_id"],"enabled":enabled}),
+            "world_settings_saved",
+        );
+        assert_eq!(receipt["ok"], true, "{receipt}");
+    }
 }
 
 pub fn configure_world(ws: &mut WebSocket<TcpStream>) {

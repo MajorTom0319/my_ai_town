@@ -67,6 +67,13 @@ pub struct EventSpeech {
     pub seat: Option<u32>,
     /// 说的话本身，不带场合和发言人
     pub text: String,
+    /// 是不是公开说的；旧录像没有这一项，按公开处理，只有明确标成频道内的才藏进「仅公开」之外。
+    #[serde(default = "public_speech")]
+    pub public: bool,
+}
+
+fn public_speech() -> bool {
+    true
 }
 
 /// 世界日志一行的结构化部分：种类、说的是谁、需要提示卡时的细节、是不是一段话。

@@ -29,6 +29,8 @@ pub(crate) struct Args {
     pub connection_token: Option<String>,
     /// 管理进程启动时传入：stdin 关闭即视为父进程退出，保存后退出。
     pub stop_on_stdin_close: bool,
+    /// 自动整理至少攒够多少条新实录；固定回复模式下调小，便于本地演示看到概览。
+    pub summary_batch: usize,
 }
 
 impl Args {
@@ -47,6 +49,7 @@ impl Args {
             ready_file: None,
             connection_token: None,
             stop_on_stdin_close: false,
+            summary_batch: crate::manuscript::AUTO_LINES,
         };
         let mut save_enabled = true;
         let mut mock_delay = Duration::from_secs(3);
@@ -88,6 +91,7 @@ impl Args {
         }
         if mock {
             a.mode = Mode::MockLlm { delay: mock_delay };
+            a.summary_batch = 3;
         }
         if save_enabled && a.save_file.is_none() {
             a.save_file = Some(host::persistence::default_save_path()?);

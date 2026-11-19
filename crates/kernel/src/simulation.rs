@@ -10,7 +10,7 @@ use crate::{
     world::Activity,
     Event, World,
 };
-use protocol::ActionStatus;
+use protocol::{ActionStatus, ManuscriptKind, ManuscriptTone, ManuscriptVisibility};
 
 /// 同一时刻连续结算零时长动作的上限，防止计划互相触发成死循环。
 const INSTANT_GUARD: usize = 400;
@@ -19,9 +19,13 @@ impl World {
     // ---------- 推进 ----------
 
     /// 以活动结束、日历和需求阈值切分时间；所有村民共享同一段世界时间。
+    /// 玩法在零片长的截止只结算这一次就返回，由新一次 `step` 从下一阶段继续。
     pub fn step(&mut self, dt: f64) -> Vec<Event> {
         assert!(dt.is_finite() && dt >= 0.0, "模拟步长须是有限的非负数");
         let until = self.minutes + dt;
+        if self.game_mode_ended() {
+            return std::mem::take(&mut self.events);
+        }
         let ids = self.actor_ids();
         self.expire_interactions();
         while self.minutes < until - 1e-9 {
@@ -55,6 +59,8 @@ impl World {
             // 带路人走完这一段后，跟随的人沿他的足迹跟上。
             self.advance_walks(step);
             self.advance_weather();
+            // 劳动按本片里真实开始和结束的动作计算，收盘、完成、中断后的空等都不另补时长。
+            self.game_mode_track_interval(t0, self.minutes);
             // 玩法要在从事现场动作完成的那一刻读写粮食、目击和守家，所以先让完成落到世界里，
             // 再调用玩法结算；恋爱、发生等新动作仍留到这一片之后。完成后没有排下一项的零时长
             // 空等活动，不能被当成一次新的取粮。
@@ -64,6 +70,12 @@ impl World {
                 }
             }
             self.advance_game_mode();
+            let settled = self.game_mode_settled();
+            // 夜间截止可能被白天的投票或陈词拖过：截止已经过去，但仍须以进入夜里的这一分钟
+            // 重新结算一次夜间，才能拿到完整的本夜，而不是把整段夜晚跳过。
+            if settled {
+                self.advance_game_mode();
+            }
             self.settle_instant_actions(&ids);
             self.fire_happenings();
             self.notice_bodies();
@@ -73,6 +85,14 @@ impl World {
             self.withdraw_departed_offers();
             self.note_presence();
             self.advance_appointments(t0);
+            if self.game_mode_ended() {
+                break;
+            }
+            // 玩法截止和日历边界落在同一分钟时，本拍已经结算过；零片长不能在同一次调用里
+            // 再走，否则同一秒的截止会无限重入。让调用方先交真实发言、投票或陈词。
+            if step <= 1e-9 {
+                break;
+            }
         }
         std::mem::take(&mut self.events)
     }
@@ -237,11 +257,55 @@ impl World {
         changes: Vec<String>,
         reason: Option<String>,
     ) {
+        let before = self.actors[id]
+            .actions
+            .groups
+            .values()
+            .map(|g| g.results.len())
+            .sum::<usize>();
         let reading = self
             .actor_mut(id)
             .finish_tracked_action(now, status, changes, reason);
         if let Some(event_id) = reading {
             self.record_completed_reading(id, event_id);
+        }
+        let a = &self.actors[id];
+        let fresh: Vec<_> = a
+            .actions
+            .groups
+            .values()
+            .flat_map(|g| &g.results)
+            .skip(before)
+            .cloned()
+            .collect();
+        let (id, name, locale) = (a.id.clone(), a.name.clone(), a.locus.locale.clone());
+        for result in fresh {
+            // 回执已经写进本人的经历；剧本照同一份回执收，失败、中断也按原文记下。
+            let text = result.reason.as_ref().map_or_else(
+                || result.changes.join("；"),
+                |r| format!("{}：{r}", result.verb),
+            );
+            if text.trim().is_empty() {
+                continue;
+            }
+            let source = format!(
+                "action:{}:{}",
+                result.action_id,
+                result.event_ids.last().copied().unwrap_or(0)
+            );
+            let fact = crate::world::ManuscriptFact {
+                kind: ManuscriptKind::Action,
+                visibility: ManuscriptVisibility::Private,
+                tone: ManuscriptTone::Result,
+                actor: Some(id.clone()),
+                name: Some(name.clone()),
+                locale: Some(locale.clone()),
+                text,
+                about: vec![id.clone()],
+                source,
+                at: result.ended_at,
+            };
+            self.manuscript(fact);
         }
     }
 
@@ -351,8 +415,38 @@ impl World {
         } else {
             vec![]
         };
+        let before = self.actors[id]
+            .actions
+            .groups
+            .values()
+            .map(|g| g.results.len())
+            .sum::<usize>();
         self.finish_tracked_action(id, now, ActionStatus::Failed, changes, Some(reason.clone()));
+        let settled = self.actors[id]
+            .actions
+            .groups
+            .values()
+            .map(|g| g.results.len())
+            .sum::<usize>()
+            > before;
         let log = self.actor_mut(id).fail_current(now, reason);
+        if !settled {
+            // 没有动作回执的失败（走路、开始前就不满足条件）：记下世界确认的失败，不写成本人做到。
+            let a = &self.actors[id];
+            let fact = crate::world::ManuscriptFact {
+                kind: ManuscriptKind::Action,
+                visibility: ManuscriptVisibility::Private,
+                tone: ManuscriptTone::Result,
+                actor: Some(id.into()),
+                name: Some(a.name.clone()),
+                locale: Some(a.locus.locale.clone()),
+                text: log.clone(),
+                about: vec![id.into()],
+                source: format!("fail:{id}:{}", (now * 60.0).round() as i64),
+                at: now,
+            };
+            self.manuscript(fact);
+        }
         self.log(self.actors[id].event_info(), log);
     }
 

@@ -6,6 +6,7 @@ mod avatar;
 mod commands;
 mod content;
 mod director;
+mod manuscript;
 mod persistence;
 mod population;
 mod possession;

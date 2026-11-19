@@ -90,6 +90,38 @@ impl Runtime {
             })
     }
 
+    /// 打开或关掉剧情概览的自动整理：开关随存档保存（存不上就撤回），并在同一拍清理节流状态。
+    /// 不暂停世界，不占世界设定的修订号；关掉后正在整理的那次照常收尾，下一次不再自动发起。
+    pub(crate) fn save_auto_summary(&mut self, request_id: String, enabled: bool) -> Outcome {
+        let result = self
+            .transact(|rt| {
+                rt.world_settings.auto_summary = enabled;
+                Ok::<_, HostError>(())
+            })
+            .map_err(|aborted| aborted.to_string());
+        if result.is_ok() {
+            // 重新打开时不必等上一次节流，有足够新实录就马上整理。
+            self.summary_wait = std::time::Instant::now();
+            // 关掉只停止之后自动发起；在途那次照常收尾，但不再为已取消的批次积压重试。
+            if !enabled {
+                self.manuscript.finish_auto();
+            }
+        }
+        Outcome::none()
+            .and_all(self.world_settings_msg())
+            .and_reply(ServerMsg::WorldSettingsSaved {
+                request_id,
+                ok: result.is_ok(),
+                message: result.err().unwrap_or_else(|| {
+                    if enabled {
+                        "会自动整理剧情概览：有足够新剧情或关键公告时调用整理模型".into()
+                    } else {
+                        "不再自动整理剧情概览；实录照常追加，需要时可手动整理".into()
+                    }
+                }),
+            })
+    }
+
     /// 删掉录完的一卷；正在录的删不了。回执后广播录像列表。
     pub(crate) fn delete_recording(&mut self, request_id: String, reel: &str) -> Outcome {
         let result = match (&self.reels, self.tape.live()) {
