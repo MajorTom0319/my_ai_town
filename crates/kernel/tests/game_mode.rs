@@ -7,9 +7,10 @@ use kernel::{
 };
 use protocol::{
     FactKind, GameModeAction, GameModeChoice, GameModeContext, GameModeView, GroupStatus,
-    PhysiologySwitches, Survival10Phase, Survival10View, SwordholderEnding, SwordholderPhase,
-    SwordholderRole, SwordholderView, TideCircle, TideFlare, TideNewsKind, TidePhase, TideView,
-    WerewolfOut, WerewolfPhase, WerewolfRole, WerewolfSide, WerewolfView,
+    ManuscriptKind, ManuscriptVisibility, PhysiologySwitches, Survival10Phase, Survival10View,
+    SwordholderEnding, SwordholderPhase, SwordholderRole, SwordholderView, TideCircle, TideFlare,
+    TideNewsKind, TidePhase, TideView, WerewolfOut, WerewolfPhase, WerewolfRole, WerewolfSide,
+    WerewolfView,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
@@ -38,7 +39,347 @@ fn notes(w: &World, id: &str) -> Vec<String> {
 const HOUR: f64 = 60.0;
 const DAY: f64 = 1440.0;
 const GOAL: [f64; 2] = [24.0, 18.0];
-const COLLECT_MINUTES: f64 = 5.5;
+
+fn disaster_board(world: &mut World, locale: &str) {
+    let definition = kernel::props::Catalog::from_json(include_str!(
+        "../../../data/props/core/definitions.json"
+    ))
+    .unwrap()
+    .latest("core:bulletin_board")
+    .unwrap()
+    .clone();
+    world
+        .place_prop(kernel::props::Placement {
+            instance: kernel::props::Instance {
+                id: "disaster-board".into(),
+                definition: definition.reference(),
+                locale: locale.into(),
+                name: None,
+                board: None,
+            },
+            definition,
+        })
+        .unwrap();
+}
+
+#[test]
+fn survival10_disasters_commit_real_losses_and_private_notices_once() {
+    let (mut world, ids) = survival10_night_world(7);
+    let event = |kind| {
+        serde_json::from_value::<protocol::GameModeEvent>(
+            json!({"kind":"survival10_disaster","event":{"kind":kind}}),
+        )
+        .unwrap()
+    };
+    let before = serde_json::to_value(world.snapshot()).unwrap();
+    assert!(world.director_game_event(&event("rats")).is_err());
+    assert_eq!(serde_json::to_value(world.snapshot()).unwrap(), before);
+    disaster_board(&mut world, "loc_a");
+    for id in &ids {
+        world.test_give_rice(id, 5);
+    }
+    let before = survival10(&world);
+    world.take_manuscript();
+    world.director_game_event(&event("rats")).unwrap();
+    let rats = survival10(&world);
+    assert!((3..=10).contains(&(before.public_rice - rats.public_rice)));
+    assert_eq!(granary_on_map(&world), rats.public_rice);
+    for id in &ids {
+        assert!(notes(&world, id)
+            .iter()
+            .any(|note| note.contains("赛事公告送达") && note.contains("鼠患")));
+    }
+    let mut replay = serde_json::to_value(world.snapshot()).unwrap();
+    world.director_game_event(&event("flood")).unwrap();
+    let flooded = survival10(&world);
+    assert_eq!(flooded.public_rice, rats.public_rice - rats.public_rice / 3);
+    let victims: Vec<_> = flooded.seats.iter().filter(|seat| seat.rice == 0).collect();
+    assert!((1..=3).contains(&victims.len()));
+    let facts = world.take_manuscript();
+    let outcome = facts
+        .iter()
+        .find(|fact| fact.source.starts_with("event:") && fact.source.ends_with("-disaster-2"))
+        .unwrap_or_else(|| panic!("天灾的裁判全知结果应进剧本：{facts:?}"));
+    assert_eq!(outcome.visibility, ManuscriptVisibility::Private);
+    for seat in &victims {
+        assert!(outcome.text.contains(&seat.name), "{outcome:?}");
+        assert!(outcome.about.contains(&seat.id), "{outcome:?}");
+    }
+    let notice = facts
+        .iter()
+        .find(|fact| fact.source.contains("-disaster-2-notice"))
+        .unwrap_or_else(|| panic!("天灾的公告正文应进公开剧本：{facts:?}"));
+    assert_eq!(notice.visibility, ManuscriptVisibility::Public);
+    assert_eq!(notice.kind, ManuscriptKind::Announcement);
+    assert!(notice.text.contains("赛事天灾公告"));
+    let loss = 5 * victims.len() as u32;
+    assert_eq!(
+        flooded.seats.iter().map(|seat| seat.rice).sum::<u32>() + loss,
+        35
+    );
+    for seat in &flooded.seats {
+        let private = notes(&world, &seat.id)
+            .iter()
+            .any(|note| note.contains("洪涝浸坏了你的私粮"));
+        assert_eq!(private, seat.rice == 0);
+    }
+    let saved = serde_json::to_value(world.snapshot()).unwrap();
+    let archive = &saved["game_mode"]["survival10"]["disasters"][1];
+    assert_eq!(
+        archive["private_losses"].as_object().unwrap().len(),
+        victims.len()
+    );
+    let public = serde_json::to_string(&flooded.disasters).unwrap();
+    assert!(!public.contains("private_losses"));
+    let bulletin = world
+        .contents()
+        .documents
+        .keys()
+        .find(|id| id.ends_with("-2") && id.contains("s10-disaster"))
+        .unwrap();
+    let content = serde_json::to_string(&world.content_detail(bulletin).unwrap()).unwrap();
+    assert!(content.contains("洪涝"));
+    assert!(!content.contains("private_losses"));
+    for id in &ids {
+        assert!(!content.contains(id));
+    }
+    world
+        .restore_snapshot(serde_json::from_value(saved).unwrap())
+        .unwrap();
+    assert_eq!(survival10(&world), flooded);
+    world
+        .restore_snapshot(serde_json::from_value(replay.take()).unwrap())
+        .unwrap();
+    world.director_game_event(&event("flood")).unwrap();
+    assert_eq!(survival10(&world), flooded);
+    assert!(
+        world
+            .take_manuscript()
+            .iter()
+            .filter(|fact| fact.text.contains("裁判全知") && fact.text.contains("住宅受灾"))
+            .all(|fact| fact.visibility == ManuscriptVisibility::Private),
+        "受灾家庭只给玩家全知视野看，「仅公开」不能出现名单"
+    );
+    let mut empty = serde_json::to_value(world.snapshot()).unwrap();
+    empty["game_mode"]["survival10"]["public_rice"] = json!(2);
+    for (index, seat) in empty["game_mode"]["survival10"]["seats"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        seat["rice"] = json!(0);
+        if index >= 5 {
+            seat["out"] = json!("已出局");
+        }
+    }
+    world
+        .restore_snapshot(serde_json::from_value(empty).unwrap())
+        .unwrap();
+    world.director_game_event(&event("rats")).unwrap();
+    assert_eq!(survival10(&world).public_rice, 0);
+    world.director_game_event(&event("flood")).unwrap();
+    let empty = serde_json::to_value(world.snapshot()).unwrap();
+    let victims = empty["game_mode"]["survival10"]["disasters"][3]["private_losses"]
+        .as_object()
+        .unwrap();
+    assert!((1..=3).contains(&victims.len()));
+    assert!(victims
+        .iter()
+        .all(|(seat, loss)| seat.parse::<usize>().unwrap() < 5 && loss == 0));
+}
+
+/// 按正式调用顺序走几步：每一步取走世界日志和剧本事实，不在测试里攒上一整轮。
+fn survival10_ticks(
+    world: &mut World,
+    events: &mut Vec<Event>,
+    facts: &mut Vec<kernel::ManuscriptFact>,
+) {
+    events.extend(world.take_events());
+    facts.extend(world.take_manuscript());
+    world.step(1.0);
+}
+
+/// 篝火会发言交齐后走到投票；发言只公开一句，不替任何人的选票作决定。
+fn survival10_to_vote(
+    world: &mut World,
+    ids: &[String],
+    events: &mut Vec<Event>,
+    facts: &mut Vec<kernel::ManuscriptFact>,
+) {
+    while survival10(world).phase != Survival10Phase::Vote {
+        let view = survival10(world);
+        if view.phase == Survival10Phase::Speech {
+            let seat = view.turn.unwrap() as usize - 1;
+            world
+                .game_mode_act(
+                    &ids[seat],
+                    &GameModeAction {
+                        action: "speak".into(),
+                        target: None,
+                        text: Some("按公告安排。".into()),
+                        reason: None,
+                    },
+                )
+                .unwrap();
+        }
+        survival10_ticks(world, events, facts);
+    }
+    events.clear();
+    facts.clear();
+}
+
+#[test]
+fn survival10_choices_and_ballots_are_visible_to_the_audience_before_they_are_public() {
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    place_survival10_farms(&mut world, "loc_a");
+    for id in &ids {
+        world.test_give_rice(id, 5);
+    }
+    let mut events = Vec::new();
+    let mut facts = Vec::new();
+    while survival10(&world).phase != Survival10Phase::Day {
+        survival10_ticks(&mut world, &mut events, &mut facts);
+    }
+    events.clear();
+    facts.clear();
+
+    survival10_act(&mut world, &ids[0], "work", None).unwrap();
+    survival10_ticks(&mut world, &mut events, &mut facts);
+    let choice = facts
+        .iter()
+        .find(|fact| fact.source.starts_with("work:"))
+        .unwrap_or_else(|| panic!("登记劳动应进剧本：{facts:?}"));
+    assert_eq!(choice.kind, ManuscriptKind::Choice);
+    assert_eq!(choice.visibility, ManuscriptVisibility::Public);
+    assert!(choice.text.contains("不等于"));
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| fact.source.starts_with("work:"))
+            .count(),
+        1
+    );
+
+    survival10_to_vote(&mut world, &ids, &mut events, &mut facts);
+    let day = survival10(&world).day;
+    // 还差一票时先看揭票前：剧本能看到提交，旁人还看不到目标。
+    let target = if ids[1] == ids[2] { &ids[3] } else { &ids[2] };
+    survival10_act(&mut world, &ids[1], "vote", Some(target)).unwrap();
+    facts.extend(world.take_manuscript());
+    let ballot = facts
+        .iter()
+        .find(|fact| fact.source.starts_with("ballot:"))
+        .unwrap_or_else(|| panic!("提交选票应进剧本：{facts:?}"));
+    assert_eq!(ballot.kind, ManuscriptKind::Choice);
+    assert_eq!(ballot.visibility, ManuscriptVisibility::Private);
+    assert!(ballot.text.contains("揭票前"));
+    assert!(!notes(&world, &ids[3])
+        .iter()
+        .any(|note| note.contains("投给")));
+
+    // 交齐其余选票：最近一拍里只剩一人，揭票后会先进入离场陈词；剧本在选票提交时就收下。
+    for (index, id) in ids.iter().enumerate().filter(|(index, _)| *index != 1) {
+        let target = if index == 2 { &ids[1] } else { &ids[2] };
+        survival10_act(&mut world, id, "vote", Some(target)).unwrap();
+    }
+    while survival10(&world).day == day && survival10(&world).phase == Survival10Phase::Vote {
+        world.step(1.0);
+        events.extend(world.take_events());
+        facts.extend(world.take_manuscript());
+    }
+    assert!(
+        facts
+            .iter()
+            .filter(|fact| fact.source.starts_with("ballot:"))
+            .count()
+            >= 5,
+        "每位参赛者的选票都应进剧本：{facts:?}"
+    );
+}
+
+#[test]
+fn survival10_crop_disasters_start_tomorrow_overlap_and_recover_after_reload() {
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    place_survival10_farms(&mut world, "loc_a");
+    disaster_board(&mut world, "loc_b");
+    for id in &ids {
+        world.test_give_rice(id, 10);
+    }
+    let event = |kind, days| {
+        serde_json::from_value::<protocol::GameModeEvent>(
+            json!({"kind":"survival10_disaster","event":{"kind":kind,"days":days}}),
+        )
+        .unwrap()
+    };
+    world.step(HOUR);
+    world.director_game_event(&event("freeze", 2)).unwrap();
+    world.director_game_event(&event("drought", 1)).unwrap();
+    let notices = survival10(&world).disasters;
+    assert_eq!(
+        (notices[0].first_day, notices[0].last_day),
+        (Some(2), Some(3))
+    );
+    let before = serde_json::to_value(world.snapshot()).unwrap();
+    assert!(world.director_game_event(&event("freeze", 0)).is_err());
+    assert_eq!(serde_json::to_value(world.snapshot()).unwrap(), before);
+    for day in 1..=4 {
+        for _ in 0..200 {
+            let view = survival10(&world);
+            if view.day == day && view.phase == Survival10Phase::Day {
+                break;
+            }
+            if view.phase == Survival10Phase::Speech {
+                let seat = view.turn.unwrap() as usize - 1;
+                let _ = world.game_mode_act(
+                    &ids[seat],
+                    &GameModeAction {
+                        action: "speak".into(),
+                        target: None,
+                        text: Some("我将按公告安排口粮。".into()),
+                        reason: None,
+                    },
+                );
+            }
+            let current = survival10(&world);
+            if current.phase == Survival10Phase::Vote {
+                for seat in current.seats.iter().filter(|seat| seat.out.is_none()) {
+                    let target = if seat.seat == 6 { "5" } else { "6" };
+                    survival10_act(&mut world, &seat.id, "vote", Some(target)).unwrap();
+                }
+            }
+            world.step(30.0);
+        }
+        let reply = survival10_act(&mut world, &ids[6], "work", None).unwrap();
+        let expected = if day == 2 || day == 3 { 0 } else { 1 };
+        assert_eq!(reply.contains("今日天灾绝收"), expected == 0);
+        let GameModeContext::Survival10(context) = world.game_mode_context(&ids[6]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(context.now.contains("绝收"), day <= 3);
+        let public = survival10(&world).public_rice;
+        let saved = serde_json::to_value(world.snapshot()).unwrap();
+        world
+            .restore_snapshot(serde_json::from_value(saved).unwrap())
+            .unwrap();
+        for _ in 0..30 {
+            if survival10(&world).phase != Survival10Phase::Day {
+                break;
+            }
+            world.step(30.0);
+        }
+        assert_eq!(survival10(&world).produced_today, expected);
+        assert_eq!(survival10(&world).public_rice, public + expected);
+    }
+    let mut late = serde_json::to_value(world.snapshot()).unwrap();
+    late["game_mode"]["survival10"]["day"] = json!(10);
+    world
+        .restore_snapshot(serde_json::from_value(late).unwrap())
+        .unwrap();
+    let before = serde_json::to_value(world.snapshot()).unwrap();
+    assert!(world.director_game_event(&event("drought", 1)).is_err());
+    assert_eq!(serde_json::to_value(world.snapshot()).unwrap(), before);
+}
 
 /// 一座圆岛：最高处在 (24, 18)，离它约 14.6 米以外是海。甲站在最高处，乙站在离它 12 米的东岸。
 fn island() -> World {
@@ -1129,11 +1470,15 @@ fn survival10_runs_ten_days_through_the_jury() {
             )
         })
         .collect();
-    let mut w = common::world_with(common::tiny_topology(), 7.0 * HOUR, &people);
+    let topology = common::topology(&common::two_places_json(|data| {
+        data["locales"][1]["name"] = json!("篝火广场");
+    }));
+    let mut w = common::world_with(topology, 7.0 * HOUR, &people);
     place_survival10_farms(&mut w, "loc_a");
     w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(4) }))
         .unwrap();
     w.test_move_granary("loc_a");
+    w.topo.locales.get_mut("loc_b").unwrap().name = "篝火广场".into();
     w.set_physiology(PhysiologySwitches {
         fullness: false,
         energy: false,
@@ -1169,8 +1514,9 @@ fn survival10_runs_ten_days_through_the_jury() {
     let mut jury_seen = false;
     let mut day10_vote_seen = false;
     let mut previous = survival10(&w);
-    let mut remaining = 91;
+    let mut remaining = 98;
     let mut meetings = Vec::new();
+    let mut gatherings = Vec::new();
     for _ in 0..20000 {
         let v = survival10(&w);
         if previous.phase == Survival10Phase::Day && v.phase != Survival10Phase::Day {
@@ -1182,6 +1528,18 @@ fn survival10_runs_ten_days_through_the_jury() {
         }
         if v.phase == Survival10Phase::Speech && previous.phase != Survival10Phase::Speech {
             meetings.push(v.day);
+            assert_eq!(kernel::time_of_day(w.minutes()), 18.5 * HOUR);
+            for seat in v.seats.iter().filter(|seat| seat.out.is_none()) {
+                assert_eq!(w.actor(&seat.id).unwrap().locus.locale, "loc_b");
+            }
+        }
+        if v.phase == Survival10Phase::Gather && previous.phase != Survival10Phase::Gather {
+            gatherings.push(v.day);
+            assert_eq!(kernel::time_of_day(w.minutes()), 18.0 * HOUR);
+            assert_eq!(kernel::time_of_day(v.until.unwrap()), 18.5 * HOUR);
+            for id in &ids {
+                assert!(survival10_act(&mut w, id, "vote", Some("2")).is_err());
+            }
         }
         previous = v.clone();
         assert_eq!(conserved(&w), remaining, "每天只能在晚餐时消耗一次口粮");
@@ -1216,7 +1574,7 @@ fn survival10_runs_ten_days_through_the_jury() {
             acted = true;
             match first {
                 "work" | "take_rice" => {
-                    mode_act(&mut w, id, first, None, None);
+                    mode_act(&mut w, id, "take_rice", None, None);
                 }
                 "whisper" => {
                     if v.day == 1 && !whispered {
@@ -1256,18 +1614,645 @@ fn survival10_runs_ten_days_through_the_jury() {
     assert_eq!(v.phase, Survival10Phase::Over);
     assert_eq!(v.day, 10);
     assert_eq!(meetings, vec![2, 4, 6, 8, 10]);
+    assert_eq!(gatherings, vec![2, 4, 6, 8, 10]);
     assert!(jury_seen);
     assert!(day10_vote_seen, "第十天不能跳过第五次篝火投票");
     assert!(v.winner.is_some(), "十日实验必须有人或明说无人获胜");
     let ended_at = w.minutes();
     w.step(HOUR);
-    assert_eq!(w.minutes(), ended_at + HOUR);
+    assert_eq!(w.minutes(), ended_at);
     w.set_game_mode(None).unwrap();
 }
 
 #[test]
-fn survival10_dinner_is_private_and_hunger_counts_evenings_not_mornings() {
+fn survival10_meeting_requires_every_real_speech_and_presence_before_voting() {
     let (mut world, ids) = survival10_world(7.0 * HOUR);
+    for id in &ids {
+        world.test_give_rice(id, 10);
+    }
+    while survival10(&world).phase != Survival10Phase::Speech {
+        world.step(30.0);
+    }
+    assert_eq!(kernel::time_of_day(world.minutes()), 18.5 * HOUR);
+    assert!(survival10(&world).lines.is_empty());
+    for (seat, id) in ids.iter().enumerate() {
+        // 发言前先提交一段想法：它只进本人见闻，不能被当成公开发言。
+        world.note_thought(id, "我觉得该公开粮食账。", "测试想法");
+        assert!(survival10(&world)
+            .lines
+            .iter()
+            .all(|line| line.seat != seat as u32 + 1));
+        mode_act(&mut world, id, "speak", None, Some("公开说明粮食账。"));
+        if let Some(next) = survival10(&world).turn {
+            assert!(next > seat as u32 + 1, "只按座位顺序逐个交接");
+        }
+    }
+    let view = survival10(&world);
+    assert_eq!(view.phase, Survival10Phase::Vote);
+    assert_eq!(view.lines.len(), 7);
+    assert!(view
+        .lines
+        .iter()
+        .all(|line| line.text == "公开说明粮食账。"));
+    assert!(survival10_act(&mut world, &ids[0], "speak", None).is_err());
+    let saved = world.snapshot();
+    world.restore_snapshot(saved).unwrap();
+    assert_eq!(survival10(&world).phase, Survival10Phase::Vote);
+    assert_eq!(survival10(&world).lines.len(), 7);
+    walk(&mut world, &ids[1], "leave-meeting", "loc_a");
+    assert!(survival10_act(&mut world, &ids[1], "vote", Some("1"))
+        .unwrap_err()
+        .to_string()
+        .contains("篝火广场"));
+    walk(&mut world, &ids[1], "return-meeting", "loc_b");
+    let night = survival10_act(&mut world, &ids[1], "vote", Some("3")).unwrap();
+    assert!(night.contains("揭票前不向其他参赛者公开目标"), "{night}");
+    for (index, id) in ids.iter().enumerate().filter(|(index, _)| *index != 1) {
+        let target = if index == 0 { "2" } else { "1" };
+        survival10_act(&mut world, id, "vote", Some(target)).unwrap();
+    }
+    assert_eq!(survival10(&world).ballots.len(), 7);
+    assert!(survival10(&world)
+        .ballots
+        .iter()
+        .all(|ballot| ballot.target.is_none()));
+    // 超时缺票不能冒充本人决定：揭票前不公开代投目标，统一揭票才给出完整记录。
+    let (mut late, late_ids) = survival10_world(7.0 * HOUR);
+    for id in &late_ids {
+        late.test_give_rice(id, 10);
+    }
+    survival10_to_vote(&mut late, &late_ids, &mut Vec::new(), &mut Vec::new());
+    for (index, id) in late_ids.iter().enumerate().filter(|(index, _)| *index != 1) {
+        survival10_act(
+            &mut late,
+            id,
+            "vote",
+            Some(if index == 0 { "2" } else { "1" }),
+        )
+        .unwrap();
+    }
+    while survival10(&late).phase == Survival10Phase::Vote {
+        late.step(1.0);
+    }
+    let view = survival10(&late);
+    // 世界先前收到的私密选票也在同一队列里；只看迟到者这一场揭票前保密的代投记录。
+    let automatic = late
+        .take_manuscript()
+        .into_iter()
+        .find(|fact| fact.source.ends_with("-automatic"))
+        .unwrap_or_else(|| panic!("迟到者的系统代投必须还能追溯：{view:?}"));
+    assert_eq!(automatic.kind, ManuscriptKind::Announcement);
+    assert_eq!(automatic.visibility, ManuscriptVisibility::Private);
+    assert!(automatic.text.contains("2号") && automatic.text.contains("代投给"));
+    assert!(!notes(&late, &late_ids[0])
+        .iter()
+        .any(|text| text.contains("2号") && text.contains("代投")));
+    assert!(
+        view.history.iter().any(|notice| {
+            notice.contains("2号")
+                && notice.contains("记名投票给")
+                && notice.contains("（系统代投）")
+        }),
+        "统一揭票时必须写清代投目标：{:?}",
+        view.history
+    );
+    world.step(1.0);
+    let view = survival10(&world);
+    assert!(
+        matches!(
+            view.phase,
+            Survival10Phase::LastWords | Survival10Phase::Night
+        ),
+        "七票揭票后进入后续阶段：{view:?}"
+    );
+    assert!(view
+        .history
+        .iter()
+        .any(|notice| notice.contains("揭票汇总")));
+}
+
+#[test]
+fn survival10_ties_repeat_speeches_and_restrict_each_runoff_to_its_candidates() {
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    for id in &ids {
+        world.test_give_rice(id, 10);
+    }
+    while survival10(&world).phase != Survival10Phase::Speech {
+        world.step(30.0);
+    }
+    for id in &ids {
+        mode_act(&mut world, id, "speak", None, Some("先讨论粮食与投票。"));
+    }
+    let rounds = [
+        ([2, 1, 1, 2, 3, 3, 4], vec![1, 2, 3]),
+        ([2, 1, 1, 1, 2, 2, 3], vec![1, 2]),
+    ];
+    let mut speech_keys = std::collections::BTreeSet::new();
+    for (targets, candidates) in rounds {
+        for (id, target) in ids.iter().zip(targets) {
+            mode_act(&mut world, id, "vote", Some(target), None);
+        }
+        world.step(0.1);
+        let view = survival10(&world);
+        assert_eq!(view.phase, Survival10Phase::Speech);
+        assert!(
+            view.until.unwrap() > world.minutes(),
+            "重投的发言截止必须从投票结束时刻重新计时：{view:?}"
+        );
+        assert!(view.seats.iter().all(|seat| seat.out.is_none()));
+        assert_eq!(view.turn, candidates.first().copied());
+        let saved = world.snapshot();
+        world.restore_snapshot(saved).unwrap();
+        for &candidate in &candidates {
+            mode_act(
+                &mut world,
+                &ids[candidate as usize - 1],
+                "speak",
+                None,
+                Some("平票后重新说明。"),
+            );
+            let protocol::ServerMsg::Roster { locales, .. } = world.roster(1.0) else {
+                panic!("名册")
+            };
+            let speech = locales
+                .iter()
+                .flat_map(|locale| &locale.members)
+                .find(|member| member.id == ids[candidate as usize - 1])
+                .unwrap()
+                .speech
+                .as_ref()
+                .unwrap();
+            assert!(speech_keys.insert(format!("{}:{}", speech.chat_id, speech.seq)));
+        }
+        let view = survival10(&world);
+        assert_eq!(view.phase, Survival10Phase::Vote);
+        assert!(
+            view.until.unwrap() > world.minutes(),
+            "重投截止不能沿用上一轮：{view:?}"
+        );
+        assert!(view.ballots.is_empty());
+        assert!(survival10_act(&mut world, &ids[0], "vote", Some("4")).is_err());
+    }
+    for (id, target) in ids.iter().zip([2, 1, 1, 1, 1, 2, 2]) {
+        mode_act(&mut world, id, "vote", Some(target), None);
+    }
+    world.step(0.1);
+    let view = survival10(&world);
+    assert_eq!(view.phase, Survival10Phase::LastWords);
+    mode_act(
+        &mut world,
+        &ids[0],
+        "farewell",
+        Some(2),
+        Some("我怀疑二号，但并无确证。"),
+    );
+    assert_eq!(survival10(&world).phase, Survival10Phase::Night);
+    let view = survival10(&world);
+    assert!(view.seats[0].out.is_some());
+    assert_eq!(
+        view.seats.iter().filter(|seat| seat.out.is_none()).count(),
+        6
+    );
+}
+
+#[test]
+fn survival10_vote_finishing_past_midnight_still_gives_the_night_its_full_deadline() {
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    world.test_give_rice(&ids[0], 1);
+    while survival10(&world).phase != Survival10Phase::Speech {
+        world.step(30.0);
+    }
+    for id in &ids {
+        mode_act(&mut world, id, "speak", None, Some("先把粮食账说清楚。"));
+    }
+    // 最后一票在揭票期限之后才交齐：投票和陈词都拖过了原定午夜，仍应完整经过这一夜，
+    // 而不是一进入夜间就被截止判成“天亮”。
+    world.step(survival10(&world).until.unwrap() - world.minutes() + 1.0);
+    while survival10(&world).phase == Survival10Phase::LastWords {
+        let seat = survival10(&world).turn.expect("轮到一个出局者") as usize - 1;
+        mode_act(
+            &mut world,
+            &ids[seat],
+            "farewell",
+            None,
+            Some("我把这一票的经过说清楚。"),
+        );
+    }
+    let round = survival10(&world).day;
+    let night = survival10(&world);
+    assert_eq!(night.phase, Survival10Phase::Night);
+    assert_eq!(night.day, round);
+    assert!(
+        night.until.unwrap() > world.minutes() + 30.0,
+        "进入夜间后不能立刻到期：{night:?}"
+    );
+    world.step(1.0);
+    assert_eq!(survival10(&world).phase, Survival10Phase::Night);
+}
+
+#[test]
+fn survival10_two_survivors_enter_jury_and_one_survivor_wins_immediately() {
+    for survivors in [0, 1, 2, 3] {
+        let (mut world, ids) = survival10_legacy_world(7.0 * HOUR);
+        for id in &ids[..survivors] {
+            world.test_give_rice(id, 10);
+        }
+        while survival10(&world).day < 2
+            || matches!(
+                survival10(&world).phase,
+                Survival10Phase::Day | Survival10Phase::Speech
+            )
+        {
+            world.step(30.0);
+        }
+        let view = survival10(&world);
+        assert_eq!(
+            view.seats.iter().filter(|seat| seat.out.is_none()).count(),
+            survivors
+        );
+        if survivors <= 1 {
+            // 濒死那一轮的所有人都先走完陈词，之后才按最终存活人数终局。
+            while survival10(&world).phase == Survival10Phase::LastWords {
+                let seat = survival10(&world).turn.expect("轮到一位出局者") as usize - 1;
+                mode_act(
+                    &mut world,
+                    &ids[seat],
+                    "farewell",
+                    None,
+                    Some("我把这一轮的选择交代清楚。"),
+                );
+            }
+            let view = survival10(&world);
+            assert_eq!(
+                view.seats.iter().filter(|seat| seat.out.is_none()).count(),
+                survivors
+            );
+            assert_eq!(view.phase, Survival10Phase::Over);
+            assert_eq!(view.winner, (survivors == 1).then_some(1));
+            assert!(view.until.is_none());
+            let ended = world.minutes();
+            world.step(24.0 * HOUR);
+            assert_eq!(world.minutes(), ended, "一人获胜后世界不再继续过夜");
+            assert!(world
+                .game_mode_act(
+                    &ids[0],
+                    &GameModeAction {
+                        action: "whisper".into(),
+                        target: Some(ids[1].clone()),
+                        text: Some("不该再被接受".into()),
+                        reason: None,
+                    },
+                )
+                .is_err());
+            assert!(world
+                .restore_snapshot(
+                    serde_json::from_value(serde_json::to_value(world.snapshot()).unwrap())
+                        .unwrap()
+                )
+                .is_ok());
+            world.step(HOUR);
+            assert_eq!(world.minutes(), ended, "保存重开后终局仍保持结束");
+            let mut legacy = serde_json::to_value(world.snapshot()).unwrap();
+            legacy["game_mode"]["survival10"]["until"] = serde_json::Value::Null;
+            world
+                .restore_snapshot(serde_json::from_value(legacy).unwrap())
+                .unwrap();
+            world.step(HOUR);
+            assert_eq!(world.minutes(), ended);
+            continue;
+        }
+        let pending = survival10(&world);
+        assert_eq!(pending.phase, Survival10Phase::LastWords);
+        let seat = pending.turn.unwrap() as usize - 1;
+        mode_act(
+            &mut world,
+            &ids[seat],
+            "farewell",
+            Some(1),
+            Some("这只是我的推测，不是裁判认定。"),
+        );
+        let saved = serde_json::to_value(world.snapshot()).unwrap();
+        world
+            .restore_snapshot(serde_json::from_value(saved).unwrap())
+            .unwrap();
+        if survivors > 2 {
+            // 三人以上：从第二天的同一轮离场之后继续走真实的会议、投票与陈词，
+            // 直到只剩两人进入陪审团。每人只交自己的原话和选票；只是等待世界走完，
+            // 一旦久停就失败。
+            let mut guard = 0;
+            let mut last = None;
+            while survival10(&world).phase != Survival10Phase::Jury && guard < 3000 {
+                guard += 1;
+                let view = survival10(&world);
+                match view.phase {
+                    Survival10Phase::Gather => {
+                        world.step(30.0);
+                    }
+                    Survival10Phase::Speech => {
+                        let seat = view.turn.expect("轮到一位发言人") as usize - 1;
+                        assert_ne!(last, Some(seat), "同一场会议的发言人不能重复");
+                        last = Some(seat);
+                        mode_act(
+                            &mut world,
+                            &ids[seat],
+                            "speak",
+                            None,
+                            Some("说明我的选择。"),
+                        );
+                    }
+                    Survival10Phase::Vote => {
+                        let live: Vec<usize> = view
+                            .seats
+                            .iter()
+                            .filter(|seat| seat.out.is_none())
+                            .map(|seat| seat.seat as usize - 1)
+                            .collect();
+                        // 揭票视图留着上一轮票，新轮只看动作栏谁还能投。先让三人互相换票
+                        // 走一轮平票；之后所有人集中投最靠前的在场者，兑现重投的淘汰。
+                        let open = |world: &World, seat: usize| {
+                            world.game_mode_context(&ids[seat]).is_some_and(|context| {
+                                matches!(context, GameModeContext::Survival10(context) if context.actions.iter().any(|a| a == "vote"))
+                            })
+                        };
+                        let runoff = view
+                            .history
+                            .first()
+                            .is_some_and(|notice| notice.contains("重投"));
+                        for &seat in &live {
+                            if !open(&world, seat) {
+                                continue;
+                            }
+                            let target = if runoff {
+                                live.iter()
+                                    .copied()
+                                    .find(|&target| target != seat)
+                                    .expect("重投还有另一位在场者")
+                            } else {
+                                live[(live.iter().position(|&s| s == seat).unwrap() + 1)
+                                    % live.len()]
+                            };
+                            let action = GameModeAction {
+                                action: "vote".into(),
+                                target: Some((target as u32 + 1).to_string()),
+                                text: None,
+                                reason: Some(format!("{}的选票", ids[seat])),
+                            };
+                            if world.game_mode_act(&ids[seat], &action).is_err() {
+                                live.iter()
+                                    .copied()
+                                    .filter(|&other| other != seat)
+                                    .find(|&other| {
+                                        world
+                                            .game_mode_act(
+                                                &ids[seat],
+                                                &GameModeAction {
+                                                    target: Some((other as u32 + 1).to_string()),
+                                                    ..action.clone()
+                                                },
+                                            )
+                                            .is_ok()
+                                    })
+                                    .expect("总有一位可投且合规的在场者");
+                            }
+                        }
+                        world.step(0.2);
+                    }
+                    Survival10Phase::LastWords => {
+                        let seat = view.turn.expect("轮到一位出局者") as usize - 1;
+                        mode_act(
+                            &mut world,
+                            &ids[seat],
+                            "farewell",
+                            None,
+                            Some("我接受这一轮结果。"),
+                        );
+                    }
+                    Survival10Phase::Day | Survival10Phase::Night => {
+                        world.step(30.0);
+                    }
+                    other => panic!("意外进入 {other:?} @{}，{view:?}", world.minutes()),
+                }
+            }
+            assert!(guard < 3000, "三人流程应有界地到达陪审团");
+            assert_eq!(survival10(&world).phase, Survival10Phase::Jury);
+        }
+        while survival10(&world).phase == Survival10Phase::LastWords {
+            let seat = survival10(&world).turn.expect("轮到一位出局者") as usize - 1;
+            mode_act(
+                &mut world,
+                &ids[seat],
+                "farewell",
+                None,
+                Some("我把这一轮的选择交代清楚。"),
+            );
+        }
+        let view = survival10(&world);
+        assert_eq!(view.phase, Survival10Phase::Jury);
+        assert_eq!(
+            view.seats.iter().filter(|seat| seat.out.is_none()).count(),
+            2
+        );
+        let saved = world.snapshot();
+        world.restore_snapshot(saved).unwrap();
+        let winner = view
+            .seats
+            .iter()
+            .find(|seat| seat.out.is_none())
+            .unwrap()
+            .seat;
+        for seat in view.seats.iter().filter(|seat| seat.out.is_some()) {
+            mode_act(&mut world, &seat.id, "jury_vote", Some(winner), None);
+        }
+        world.step(0.1);
+        let view = survival10(&world);
+        assert_eq!(view.phase, Survival10Phase::Over);
+        assert_eq!(view.winner, Some(winner));
+        let ended = world.minutes();
+        let saved = serde_json::to_value(world.snapshot()).unwrap();
+        world
+            .restore_snapshot(serde_json::from_value(saved).unwrap())
+            .unwrap();
+        world.step(DAY);
+        assert_eq!(world.minutes(), ended);
+    }
+}
+
+/// 陪审投票也宣布“不能弃票”：超时缺票由系统代投，揭票、剧本和终局记录都能看出这一票不是本人提交的。
+#[test]
+fn survival10_missing_jury_votes_are_auto_cast_and_traceable() {
+    let (mut world, ids) = survival10_legacy_world(7.0 * HOUR);
+    for id in &ids[..=2] {
+        world.test_give_rice(id, 10);
+    }
+    let mut guard = 0;
+    while survival10(&world).phase != Survival10Phase::Jury {
+        guard += 1;
+        assert!(guard < 2000, "九天内应进入陪审团");
+        let view = survival10(&world);
+        match view.phase {
+            Survival10Phase::Waiting
+            | Survival10Phase::Gather
+            | Survival10Phase::Day
+            | Survival10Phase::Night => {
+                world.step(30.0);
+            }
+            Survival10Phase::Speech => {
+                let seat = view.turn.expect("轮到一位发言人") as usize - 1;
+                mode_act(
+                    &mut world,
+                    &ids[seat],
+                    "speak",
+                    None,
+                    Some("说明我的选择。"),
+                );
+            }
+            Survival10Phase::Vote => {
+                let live: Vec<usize> = view
+                    .seats
+                    .iter()
+                    .filter(|seat| seat.out.is_none())
+                    .map(|seat| seat.seat as usize - 1)
+                    .collect();
+                for &seat in &live {
+                    let target = live
+                        .iter()
+                        .copied()
+                        .find(|&target| target != seat)
+                        .expect("还有另一位在场者");
+                    mode_act(
+                        &mut world,
+                        &ids[seat],
+                        "vote",
+                        Some(target as u32 + 1),
+                        None,
+                    );
+                }
+                world.step(0.2);
+            }
+            Survival10Phase::LastWords => {
+                let seat = view.turn.expect("轮到一位出局者") as usize - 1;
+                mode_act(
+                    &mut world,
+                    &ids[seat],
+                    "farewell",
+                    None,
+                    Some("我接受这一轮结果。"),
+                );
+            }
+            other => panic!("意外进入 {other:?} @{}", world.minutes()),
+        }
+    }
+    let view = survival10(&world);
+    let juries: Vec<u32> = view
+        .seats
+        .iter()
+        .filter(|seat| seat.out.is_some())
+        .map(|seat| seat.seat)
+        .collect();
+    assert!(!juries.is_empty());
+    let winner = view
+        .seats
+        .iter()
+        .find(|seat| seat.out.is_none())
+        .expect("还有候选人")
+        .seat;
+    // 只让一位陪审员本人投票；其余人等到截止，检查系统代投和揭票。
+    mode_act(
+        &mut world,
+        &view.seats[juries[0] as usize - 1].id,
+        "jury_vote",
+        Some(winner),
+        None,
+    );
+    world.step(39.0);
+    world.step(1.0);
+    let facts = world
+        .take_manuscript()
+        .into_iter()
+        .filter(|entry| entry.source.starts_with(&format!("jury:{}-", view.day)))
+        .filter(|entry| entry.source.ends_with("-automatic"))
+        .count();
+    let view = survival10(&world);
+    assert_eq!(view.phase, Survival10Phase::Over);
+    assert!(view.revealed);
+    for &seat in &juries[1..] {
+        let ballot = view
+            .ballots
+            .iter()
+            .find(|ballot| ballot.voter == seat)
+            .expect("超时者必须有一张系统代投");
+        assert!(ballot.automatic);
+        assert!(view
+            .seats
+            .iter()
+            .any(|s| { s.seat == ballot.target.unwrap() && s.out.is_none() }));
+    }
+    assert!(view
+        .history
+        .iter()
+        .any(|line| line.contains("（系统代投）")));
+    assert_eq!(
+        facts,
+        juries.len() - 1,
+        "每位超时者都要有可追溯的代投剧本事实"
+    );
+}
+
+/// 同一顿晚饭有多人连续断粮：每人都要有陈词机会；全部离场后只开一次新阶段，
+/// 不能把其余出局者直接甩给夜晚，也不能让原投票截止继续推进下一阶段。
+#[test]
+fn survival10_several_starving_players_finish_every_farewell_before_the_next_phase() {
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    while survival10(&world).phase != Survival10Phase::Day {
+        world.step(30.0);
+    }
+    // 不等到晚饭：只把结算状态摆到第二天晚饭前一刻，检查同一拍的所有出局是否被收齐。
+    let mut saved = serde_json::to_value(world.snapshot()).unwrap();
+    saved["game_mode"]["survival10"]["day"] = json!(2);
+    saved["game_mode"]["survival10"]["phase"] = json!("day");
+    saved["game_mode"]["survival10"]["until"] = json!(world.minutes() + 1.0);
+    for seat in saved["game_mode"]["survival10"]["seats"]
+        .as_array_mut()
+        .unwrap()
+    {
+        seat["rice"] = json!(0);
+        seat["hungry_streak"] = json!(1);
+    }
+    world
+        .restore_snapshot(serde_json::from_value(saved).unwrap())
+        .unwrap();
+    world.step(2.0);
+    let mut seen = Vec::new();
+    for _ in 0..ids.len() + 1 {
+        let view = survival10(&world);
+        assert_eq!(
+            view.phase,
+            Survival10Phase::LastWords,
+            "七人同夜断粮时先把陈词走完：{view:?}"
+        );
+        let turn = view.turn.expect("轮到一位出局者") as usize - 1;
+        seen.push(turn);
+        mode_act(
+            &mut world,
+            &ids[turn],
+            "farewell",
+            None,
+            Some("我接受出局。"),
+        );
+        if survival10(&world).phase != Survival10Phase::LastWords {
+            break;
+        }
+    }
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), 7, "每位出局者都有一次陈词：{seen:?}");
+    assert_eq!(survival10(&world).phase, Survival10Phase::Over);
+    assert_eq!(survival10(&world).winner, None);
+}
+
+#[test]
+fn survival10_dinner_is_private_and_hunger_counts_evenings_not_mornings() {
+    let (mut world, ids) = survival10_legacy_world(7.0 * HOUR);
     world.test_give_rice(&ids[0], 3);
     world.test_give_rice(&ids[1], 1);
     world.step(11.0 * HOUR);
@@ -1296,6 +2281,34 @@ fn survival10_dinner_is_private_and_hunger_counts_evenings_not_mornings() {
     assert!(next_dinner.seats[2..].iter().all(|seat| {
         seat.hungry_streak == 2 && seat.out.as_deref() == Some("连续两晚未进食")
     }));
+    let facts = world.take_manuscript();
+    let dinner = facts
+        .iter()
+        .find(|fact| {
+            fact.source.ends_with("-1")
+                && fact.source.starts_with("dinner:")
+                && fact.text.contains("晚餐")
+        })
+        .expect("晚餐要有旁观者可见的剧本结果");
+    assert_eq!(dinner.visibility, ManuscriptVisibility::Private);
+    assert!(dinner.text.contains("1号甲消耗晚餐1袋，私粮剩余2袋"));
+    assert!(dinner.text.matches("没有米可吃，已连续1晚未进食").count() >= 1);
+    let elimination = facts
+        .iter()
+        .find(|fact| fact.source.starts_with("eliminate:"))
+        .expect("出局私粮归公仓要在剧本里可追溯");
+    assert!(elimination.text.contains("出局前持有私粮0袋"));
+    assert_eq!(
+        elimination.visibility,
+        ManuscriptVisibility::Private,
+        "出局者私粮余额不能出现在「仅公开」"
+    );
+    assert!(
+        !notes(&world, &ids[1])
+            .iter()
+            .any(|text| text.contains("出局前持有私粮") || text.contains("晚餐：")),
+        "剧本的全知账目不能写进别人的记忆"
+    );
 }
 
 /// 测试地图没有粮仓地点：大家在甲地，粮仓也摆在甲地，玩法的粮仓位置用测试钩子指到甲地。
@@ -1341,6 +2354,21 @@ fn survival10_world(start: f64) -> (World, Vec<String>) {
     w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(3) }))
         .unwrap();
     w.test_move_granary("loc_a");
+    w.topo.locales.get_mut("loc_b").unwrap().name = "篝火广场".into();
+    (w, ids)
+}
+
+fn survival10_legacy_world(start: f64) -> (World, Vec<String>) {
+    let (mut w, ids) = survival10_world(start);
+    let mut empty = serde_json::to_value(w.snapshot()).unwrap();
+    for seat in empty["game_mode"]["survival10"]["seats"]
+        .as_array_mut()
+        .unwrap()
+    {
+        seat["rice"] = json!(0);
+    }
+    w.restore_snapshot(serde_json::from_value(empty).unwrap())
+        .unwrap();
     (w, ids)
 }
 
@@ -1389,11 +2417,15 @@ fn survival10_real_topology() -> kernel::Topology {
         data["navigation"] = json!(null);
         data["precise_navigation"] = json!(false);
         data["places"].as_array_mut().unwrap().push(json!({
-            "name": "路东空地", "locale": "loc_c", "arrival_station": "st_a",
+            "name": "路东空地", "locale": "loc_c", "arrival_station": "st_c",
             "type": "tiny", "summary": ""
         }));
         data["stations"].as_array_mut().unwrap().push(json!({
             "id": "st_c", "locale": "loc_c", "name": "粮仓广场", "kind": "arrival", "node": "n_c"
+        }));
+        data["passages"].as_array_mut().unwrap().push(json!({
+            "id": "p_granary", "a": "loc_c", "b": "loc_a",
+            "node_a": "n_c", "node_b": "n_a", "minutes": 0.0, "capabilities": ["通行"]
         }));
         let mut props = data["props"].as_array().unwrap().clone();
         props.push(json!({
@@ -1483,6 +2515,9 @@ fn survival10_night_world(seed: u32) -> (World, Vec<String>) {
         weather: false,
     });
     place_survival10_real_props(&mut w, true);
+    for (index, id) in ids.iter().enumerate() {
+        w.actor_for_test(id).home = Some(format!("test_{}", index + 1));
+    }
     w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(seed) }))
         .unwrap();
     w.test_move_granary("loc_c");
@@ -1491,6 +2526,47 @@ fn survival10_night_world(seed: u32) -> (World, Vec<String>) {
         w.step(30.0);
     }
     (w, ids)
+}
+
+/// 玩家把夜里正在睡觉的人叫去别处：必须产生一次私密的“没有有效睡觉”结果，
+/// 不能因为动作被中断就从剧本里消失，也不能把系统中断改写成别人已知的事。
+#[test]
+fn survival10_interrupted_sleep_is_reported_as_a_private_failed_result() {
+    let (mut world, ids) = survival10_night_world(3);
+    survival10_act(&mut world, &ids[1], "sleep", None).unwrap();
+    let home = world.actor(&ids[1]).unwrap().home.clone().unwrap();
+    walk(&mut world, &ids[1], "sleep-home", &home);
+    common::run(
+        &mut world,
+        &ids[1],
+        "sleep-bed",
+        json!({"intent": {"verb": "睡觉"}, "prop_id": "bed_2"}),
+    )
+    .unwrap();
+    world.step(10.0);
+    // 外部动作打断睡眠，通用中断在这里给当事人落一次真实回执。
+    world.interrupt_actions(&ids[1], "测试：中途起床离开");
+    world.step(1.0);
+    world.take_manuscript();
+    let day = survival10(&world).day;
+    while survival10(&world).day == day {
+        world.step(30.0);
+    }
+    let facts = world.take_manuscript();
+    let failed = facts
+        .iter()
+        .find(|fact| fact.text.contains("登记了睡觉") && fact.text.contains("没有有效睡觉"))
+        .unwrap_or_else(|| panic!("中断的睡眠必须有失败结果：{facts:?}"));
+    assert_eq!(failed.visibility, ManuscriptVisibility::Private);
+    assert_eq!(failed.kind, ManuscriptKind::Action);
+    for other in [&ids[0], &ids[2], &ids[3]] {
+        assert!(
+            !notes(&world, other)
+                .iter()
+                .any(|text| text.contains("没有有效睡觉")),
+            "睡眠失败不能写进旁人的记忆：{other}"
+        );
+    }
 }
 
 fn survival10_act(
@@ -1508,6 +2584,162 @@ fn survival10_act(
             reason: None,
         },
     )
+}
+
+#[test]
+fn survival10_whisper_archive_survives_delivery_and_recipient_elimination_without_leaking() {
+    let (mut world, ids) = survival10_legacy_world(7.0 * HOUR);
+    for id in ids.iter().filter(|id| *id != &ids[2]) {
+        world.test_give_rice(id, 10);
+    }
+    world.step(HOUR);
+    let first = "仅甲乙可知的密信正文";
+    mode_act(&mut world, &ids[0], "whisper", Some(2), Some(first));
+    let saved = serde_json::to_value(world.snapshot()).unwrap();
+    let archive = &saved["game_mode"]["survival10"]["whisper_archive"];
+    assert_eq!(archive[0]["content"], first);
+    assert_eq!(archive[0]["status"], "pending");
+    assert_eq!(archive[0]["sent_at"], world.minutes());
+    assert!(!notes(&world, &ids[1])
+        .iter()
+        .any(|note| note.contains(first)));
+    world
+        .restore_snapshot(serde_json::from_value(saved).unwrap())
+        .unwrap();
+    let mut events = Vec::new();
+    let mut kept = Vec::new();
+    while survival10(&world).day < 2 {
+        events.extend(world.step(1.0));
+        kept.extend(world.take_manuscript());
+    }
+    assert!(notes(&world, &ids[1])
+        .iter()
+        .any(|note| note.contains(first)));
+    let second = "因接收者出局而未投递的密信正文";
+    mode_act(&mut world, &ids[0], "whisper", Some(3), Some(second));
+    while survival10(&world).day < 3 {
+        let view = survival10(&world);
+        kept.extend(world.take_manuscript());
+        if view.phase == Survival10Phase::Speech {
+            let seat = view.turn.unwrap() as usize - 1;
+            let actor = world.actor(&ids[seat]).unwrap();
+            if actor.locus.locale != "loc_b"
+                || matches!(actor.current.kind, kernel::world::ActKind::Travel { .. })
+            {
+                events.extend(world.step(1.0));
+                continue;
+            }
+            mode_act(
+                &mut world,
+                &ids[seat],
+                "speak",
+                None,
+                Some("我会核对粮食与承诺。"),
+            );
+        }
+        events.extend(world.step(1.0));
+    }
+    kept.extend(world.take_manuscript());
+    let saved = serde_json::to_value(world.snapshot()).unwrap();
+    let archive = &saved["game_mode"]["survival10"]["whisper_archive"];
+    assert_eq!(archive.as_array().unwrap().len(), 2);
+    assert_eq!(archive[0]["status"], "delivered");
+    assert_eq!(archive[1]["status"], "recipient_eliminated");
+    assert_eq!(archive[1]["content"], second);
+    assert_eq!(archive[1]["from"], ids[0]);
+    assert_eq!(archive[1]["to"], ids[2]);
+    assert!(archive[1]["resolved_at"].is_number());
+    kept.extend(world.take_manuscript());
+    assert_eq!(
+        saved["game_mode"]["survival10"]["pending_whispers"],
+        json!([])
+    );
+    world
+        .restore_snapshot(serde_json::from_value(saved).unwrap())
+        .unwrap();
+    assert!(
+        kept.iter()
+            .any(|fact| fact.text.contains(first) && fact.text.contains("收到")),
+        "收信人的剧本应有真实投递：{kept:?}"
+    );
+    let undelivered = kept
+        .iter()
+        .find(|fact| fact.source.ends_with("-recipient-out"))
+        .unwrap_or_else(|| panic!("剧本应说明悄悄话没有投递：{kept:?}"));
+    assert_eq!(undelivered.visibility, ManuscriptVisibility::Private);
+    assert!(undelivered.text.contains("没有投递"), "{undelivered:?}");
+    assert_eq!(undelivered.about, vec![ids[0].clone()]);
+    assert!(!notes(&world, &ids[2])
+        .iter()
+        .any(|note| note.contains(second)));
+    for secret in [first, second] {
+        assert!(!format!("{events:?}").contains(secret));
+        assert!(!serde_json::to_string(&world.game_mode_view())
+            .unwrap()
+            .contains(secret));
+        assert!(!serde_json::to_string(&world.game_mode_context(&ids[3]))
+            .unwrap()
+            .contains(secret));
+    }
+}
+
+#[test]
+fn survival10_director_changes_authoritative_rice_during_collection_and_survives_reload() {
+    use kernel::props::SupplyAdjustment;
+    let (mut world, ids) = survival10_world(7.0 * HOUR);
+    world.step(HOUR);
+    survival10_act(&mut world, &ids[0], "take_rice", None).unwrap();
+    common::run(
+        &mut world,
+        &ids[0],
+        "take-through-event",
+        json!({
+            "intent": {"verb": "取粮", "locale": "loc_a"}, "prop_id": "granary"
+        }),
+    )
+    .unwrap();
+    world.step(5.0);
+    assert_eq!(
+        world
+            .director_adjust_supply(
+                "granary",
+                Some("take"),
+                SupplyAdjustment::Halve,
+                "雨水毁坏部分存粮"
+            )
+            .unwrap(),
+        ("take".into(), 21, 10)
+    );
+    assert_eq!(granary_on_map(&world), 10);
+    assert_eq!(survival10(&world).public_rice, 10);
+    assert!(!notes(&world, &ids[1])
+        .iter()
+        .any(|note| note.contains("雨水毁坏")));
+    let saved = serde_json::to_value(world.snapshot()).unwrap();
+    assert_eq!(
+        saved["game_mode"]["survival10"]["supply_changes"][0]["before"],
+        21
+    );
+    assert_eq!(
+        saved["game_mode"]["survival10"]["supply_changes"][0]["after"],
+        10
+    );
+    world
+        .restore_snapshot(serde_json::from_value(saved).unwrap())
+        .unwrap();
+    world.step(5.0);
+    assert_eq!(granary_on_map(&world), 9);
+    assert_eq!(survival10(&world).seats[0].rice, 2);
+    let before = serde_json::to_value(world.snapshot()).unwrap();
+    assert!(world
+        .director_adjust_supply(
+            "granary",
+            Some("take"),
+            SupplyAdjustment::Subtract(20),
+            "不能扣成负数"
+        )
+        .is_err());
+    assert_eq!(serde_json::to_value(world.snapshot()).unwrap(), before);
 }
 
 #[test]
@@ -1563,8 +2795,31 @@ fn survival10_night_reminder_is_once_per_night_across_reload_and_legacy_saves() 
     assert_eq!(reminders(&world, &ids[1]), 1);
     world.step(until - world.minutes());
     while survival10(&world).phase != Survival10Phase::Night {
+        let view = survival10(&world);
+        if view.phase == Survival10Phase::Speech {
+            let seat = view.turn.unwrap() as usize - 1;
+            let actor = world.actor(&ids[seat]).unwrap();
+            if actor.locus.locale != "loc_b"
+                || matches!(actor.current.kind, kernel::world::ActKind::Travel { .. })
+            {
+                world.step(1.0);
+                continue;
+            }
+            let speech = GameModeAction {
+                action: "speak".into(),
+                text: Some("我会看清规则再行动。".into()),
+                target: None,
+                reason: None,
+            };
+            world.game_mode_act(&ids[seat], &speech).unwrap();
+        }
         world.step(30.0);
     }
+    // 白天会议的截止和入夜的重设发生在同一分钟；先让内核按原截止推进，
+    // 再以新进入的夜间截止推进一眼，才是下一夜真正开始。
+    let until = survival10(&world).until.unwrap();
+    world.step(until - world.minutes() + 1.0);
+    assert_eq!(survival10(&world).phase, Survival10Phase::Night);
     let until = survival10(&world).until.unwrap();
     world.step(until - world.minutes() - 59.0);
     assert_eq!(reminders(&world, &ids[1]), 2);
@@ -1612,7 +2867,7 @@ fn survival10_granary_on_the_map_tracks_rice() {
         .unwrap();
     assert!(pantry.actions.iter().any(|action| matches!(
         action,
-        protocol::PropActionEntry::Defined(view) if view.remaining == Some(Some(0))
+        protocol::PropActionEntry::Defined(view) if view.remaining == Some(Some(1))
     )));
     assert!(w.affordances.for_prop("granary", "take").is_none());
     assert!(w.affordances.for_prop("granary", "取粮").is_some());
@@ -1651,12 +2906,12 @@ fn survival10_granary_on_the_map_tracks_rice() {
     )
     .unwrap();
     w.step(9.0);
-    assert_eq!(survival10(&w).seats[0].rice, 0);
+    assert_eq!(survival10(&w).seats[0].rice, 1);
     assert_eq!(granary_on_map(&w), 21);
     let (fresh, _) = survival10_world(7.0 * HOUR);
     w = common::restore(&w, fresh);
     w.step(1.0);
-    assert_eq!(survival10(&w).seats[0].rice, 1);
+    assert_eq!(survival10(&w).seats[0].rice, 2);
     assert_eq!(granary_on_map(&w), 20);
     let group = w.action_group(&ids[0], "take-and-leave").unwrap();
     assert_eq!(group.results[0].status, protocol::ActionStatus::Succeeded);
@@ -1678,14 +2933,14 @@ fn survival10_granary_on_the_map_tracks_rice() {
         GroupStatus::Succeeded
     );
     assert_eq!(w.actor(&ids[0]).unwrap().locus.locale, "loc_b");
-    assert_eq!(survival10(&w).seats[0].rice, 1);
+    assert_eq!(survival10(&w).seats[0].rice, 2);
     let pantry = w
         .prop_views()
         .into_iter()
         .find(|prop| prop.id == "user:s10-home_pantry_v2_1")
         .unwrap();
     assert!(pantry.actions.iter().any(|action| matches!(action,
-        protocol::PropActionEntry::Defined(view) if view.remaining == Some(Some(1))
+        protocol::PropActionEntry::Defined(view) if view.remaining == Some(Some(2))
     )));
     let (fresh, _) = survival10_world(7.0 * HOUR);
     w = common::restore(&w, fresh);
@@ -1726,7 +2981,7 @@ fn survival10_granary_interruption_and_last_bag_do_not_create_claims() {
         GroupStatus::Interrupted
     );
     w.step(1.0);
-    assert_eq!(survival10(&w).seats[0].rice, 0);
+    assert_eq!(survival10(&w).seats[0].rice, 1);
     assert_eq!(granary_on_map(&w), 21);
     let mut save = serde_json::to_value(w.snapshot()).unwrap();
     save["game_mode"]["survival10"]["public_rice"] = json!(1);
@@ -1739,7 +2994,7 @@ fn survival10_granary_interruption_and_last_bag_do_not_create_claims() {
     common::run(
         &mut w,
         &ids[1],
-        "occupied-take",
+        "concurrent-take",
         json!({
             "intent": {"verb": "collect", "locale": "loc_a"}, "prop_id": "granary"
         }),
@@ -1750,12 +3005,8 @@ fn survival10_granary_interruption_and_last_bag_do_not_create_claims() {
         w.action_group(&ids[0], "retry-take").unwrap().status,
         GroupStatus::Succeeded
     );
-    assert_eq!(
-        w.action_group(&ids[1], "occupied-take").unwrap().status,
-        GroupStatus::Failed
-    );
-    assert_eq!(survival10(&w).seats[0].rice, 1);
-    assert_eq!(survival10(&w).seats[1].rice, 0);
+    assert_eq!(survival10(&w).seats[0].rice, 2, "最后一袋按完成时余额到账");
+    assert_eq!(survival10(&w).seats[1].rice, 1);
     assert_eq!(granary_on_map(&w), 0);
     assert!(common::run(
         &mut w,
@@ -1779,12 +3030,13 @@ fn survival10_granary_interruption_and_last_bag_do_not_create_claims() {
     );
     w.step(30.0);
     assert_eq!(granary_on_map(&w), 0);
-    assert_eq!(survival10(&w).seats[0].rice, 1);
+    assert_eq!(survival10(&w).seats[0].rice, 2);
 }
 
 #[test]
 fn survival10_granary_night_collection_only_informs_present_witnesses() {
     let (mut w, ids) = survival10_world(7.0 * HOUR);
+    w.test_move_granary("loc_a");
     w.step(HOUR);
     while survival10(&w).phase != Survival10Phase::Night {
         w.step(30.0);
@@ -1842,18 +3094,66 @@ fn survival10_stealing_into_a_home_is_silent_unless_guarded() {
     let run = |guard: bool, leave: bool| {
         let (mut w, ids) = survival10_night_world(3);
         w.test_give_rice(&ids[0], 1);
+        assert!(survival10_act(&mut w, &ids[1], "take_rice", None).is_err());
+        assert!(survival10_act(&mut w, &ids[1], "work", None).is_err());
         survival10_act(&mut w, &ids[1], "steal_home", Some("1")).unwrap();
+        assert!(survival10_act(&mut w, &ids[1], "steal_public", None).is_err());
+        assert!(survival10_act(&mut w, &ids[1], "sleep", None).is_err());
         if guard {
             survival10_act(&mut w, &ids[0], "guard_home", None).unwrap();
         }
         let target_home = w.actor(&ids[0]).unwrap().home.clone().unwrap();
         walk(&mut w, &ids[1], "steal-goto", &target_home);
+        assert!(common::run(
+            &mut w,
+            &ids[1],
+            "thief-cannot-sleep",
+            json!({
+                "intent": {"verb":"sleep", "locale": target_home}, "prop_id":"bed_1"
+            })
+        )
+        .is_err());
         if leave {
             walk(&mut w, &ids[0], "guard-leave", "loc_c");
         }
-        w.step(4.0);
-        assert_eq!(survival10(&w).seats[0].rice, 1, "入室没满五分钟不能偷");
-        w.step(COLLECT_MINUTES);
+        w.step(20.0);
+        assert_eq!(survival10(&w).seats[0].rice, 1, "仅到场和空等不会自动偷粮");
+        common::run(
+            &mut w,
+            &ids[1],
+            "home-collect",
+            json!({
+                "intent": {"verb": "collect", "locale": target_home},
+                "prop_id": "user:s10-home_pantry_v2_1"
+            }),
+        )
+        .unwrap();
+        w.step(9.0);
+        assert_eq!(survival10(&w).seats[0].rice, 1, "十分钟动作未完成不能偷");
+        w.step(1.0);
+        if guard && !leave {
+            assert!(common::run(
+                &mut w,
+                &ids[0],
+                "guard-cannot-sleep",
+                json!({
+                    "intent": {"verb":"sleep", "locale": target_home}, "prop_id":"bed_1"
+                })
+            )
+            .is_err());
+        }
+        // 登记只有一次夜间行动：下一个动作组必须在启动前就被拒绝，不能先排队到其他
+        // 已经结束的动作后面、等一会儿才失败。
+        assert!(common::run(
+            &mut w,
+            &ids[1],
+            "repeat-home-collect",
+            json!({
+                "intent": {"verb": "collect", "locale": target_home},
+                "prop_id": "user:s10-home_pantry_v2_1"
+            }),
+        )
+        .is_err());
         let result = (
             notes(&w, &ids[1]),
             notes(&w, &ids[0]),
@@ -1882,7 +3182,7 @@ fn survival10_stealing_into_a_home_is_silent_unless_guarded() {
     assert!(
         !bystander
             .iter()
-            .any(|t| t.contains("看见") || t.contains("偷")),
+            .any(|t| t.contains("看见") || t.contains("翻私粮袋")),
         "{bystander:?}"
     );
 
@@ -1907,8 +3207,8 @@ fn survival10_stealing_into_a_home_is_silent_unless_guarded() {
     );
 }
 
-/// 白天行动走完整路径：走到田里累计八小时，聊天会停表；领米动作没完成不到账；
-/// 同一机会不能改选。存档重开后劳动分钟和已领取状态都还在。
+/// 白天行动走完整路径：劳动中不能交谈，主动结束劳动后仍可继续累计到八小时；
+/// 领米动作没完成不到账，同一机会不能改选。存档重开后劳动分钟和已领取状态都还在。
 #[test]
 fn survival10_day_actions_follow_real_work_and_granary_visits() {
     let ids: Vec<String> = (0..7).map(|n| format!("h{n}")).collect();
@@ -1939,10 +3239,24 @@ fn survival10_day_actions_follow_real_work_and_granary_visits() {
     place_survival10_real_props(&mut w, true);
     w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(5) }))
         .unwrap();
+    w.test_move_granary("loc_c");
     w.step(HOUR);
     assert_eq!(survival10(&w).phase, Survival10Phase::Day);
+    assert!(
+        common::run(
+            &mut w,
+            &ids[0],
+            "day-pantry",
+            json!({
+                "intent": {"verb": "collect", "locale": "test_1"},
+                "prop_id": "user:s10-home_pantry_v2_1"
+            })
+        )
+        .is_err(),
+        "白天不能用私粮袋绕过二选一"
+    );
     let answer = survival10_act(&mut w, &ids[1], "work", None).unwrap();
-    assert!(answer.contains("还没增加公仓"), "{answer}");
+    assert!(answer.contains("白天结束时按报名结算"), "{answer}");
     assert!(survival10_act(&mut w, &ids[1], "take_rice", None).is_err());
 
     // 2 号走到分配的田块，八小时动作中途聊天，回来只需补足剩余时间。
@@ -1967,35 +3281,41 @@ fn survival10_day_actions_follow_real_work_and_granary_visits() {
     );
     assert!(working.working_now, "右上角的劳动进度必须对应当前真实动作");
     walk(&mut w, &ids[0], "farm-visitor", "loc_b");
-    let invited = w
-        .interact(
-            &ids[0],
-            "farm-work-talk",
-            w.actor(&ids[0]).unwrap().actions.revision,
+    let talk = |w: &mut World, key: &str, actor: &str, partner: &str| {
+        w.interact(
+            actor,
+            key,
+            w.actor(actor).unwrap().actions.revision,
             &protocol::InteractionCommand::Offer {
-                partner_id: ids[1].clone(),
+                partner_id: partner.into(),
                 interaction: protocol::InteractionKind::Talk,
-                message: "还在忙".into(),
+                message: "聊两句".into(),
             },
         )
-        .unwrap();
+    };
+    assert!(talk(&mut w, "farm-work-talk", &ids[0], &ids[1])
+        .unwrap_err()
+        .to_string()
+        .contains("不能开始交谈"));
     assert!(
         survival10(&w).seats[1].working_now,
-        "收到邀请但还没答应时仍在劳动"
+        "交谈被拒绝后仍在真实劳动"
     );
     w.step(10.0);
-    let invited_working = &survival10(&w).seats[1];
-    assert!(invited_working.working_now);
+    let working = &survival10(&w).seats[1];
     assert!(
-        (250.0..=251.0).contains(&invited_working.labor_progress),
-        "回应邀请前的真实劳动仍要计入：{}",
-        invited_working.labor_progress
+        (250.0..=253.0).contains(&working.labor_progress),
+        "被拒绝的交谈不能停表：{}",
+        working.labor_progress
     );
-    let revision = w.actor(&ids[1]).unwrap().actions.revision;
+    w.interrupt_actions(&ids[1], "本人结束劳动");
+    w.step(5.0);
+    let before_break = survival10(&w).seats[1].worked_minutes;
+    let invited = talk(&mut w, "farm-break-talk", &ids[0], &ids[1]).unwrap();
     w.interact(
         &ids[1],
-        "farm-reply",
-        revision,
+        "farm-break-reply",
+        w.actor(&ids[1]).unwrap().actions.revision,
         &protocol::InteractionCommand::Reply {
             interaction_id: invited.id.clone(),
             accept: true,
@@ -2006,24 +3326,22 @@ fn survival10_day_actions_follow_real_work_and_granary_visits() {
     w.step(30.0);
     let talking = &survival10(&w).seats[1];
     assert_eq!(
-        talking.worked_minutes, 250.0,
-        "答应邀请那一刻起聊天必须停表"
+        talking.worked_minutes, before_break,
+        "主动停劳动后交谈期间不计劳动"
     );
     assert_eq!(
         talking.labor_progress, talking.worked_minutes,
         "聊天期间界面不能继续涨时间"
     );
     assert!(!talking.working_now, "聊天中不能再显示农田劳作中");
+    assert!(survival10_act(&mut w, &ids[1], "take_rice", None).is_err());
     let mut fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
     place_survival10_real_props(&mut fresh, true);
     w = common::restore(&w, fresh);
     assert_eq!(survival10(&w).seats[1].farm.as_ref(), Some(&farm));
-    w.step(HOUR);
-    assert_eq!(
-        survival10(&w).seats[1].worked_minutes,
-        240.0,
-        "聊天后还要重新下地"
-    );
+    w.step(1.0);
+    assert_eq!(survival10(&w).seats[1].worked_minutes, before_break);
+    w.interrupt_actions(&ids[1], "交谈结束，恢复田里劳动");
     common::run(
         &mut w,
         &ids[1],
@@ -2033,7 +3351,7 @@ fn survival10_day_actions_follow_real_work_and_granary_visits() {
         }),
     )
     .unwrap();
-    w.step(4.0 * HOUR - 1.0);
+    w.step(8.0 * HOUR - before_break - 1.0);
     assert_eq!(survival10(&w).seats[1].worked_minutes, 479.0);
     w.step(1.0);
     assert_eq!(
@@ -2045,10 +3363,11 @@ fn survival10_day_actions_follow_real_work_and_granary_visits() {
 
     // 1 号只在原地登记工作；3 号登记领米却没有取粮。
     survival10_act(&mut w, &ids[0], "work", None).unwrap();
+    survival10_act(&mut w, &ids[4], "work", None).unwrap();
     survival10_act(&mut w, &ids[2], "take_rice", None).unwrap();
     w.step(30.0);
     assert_eq!(survival10(&w).seats[0].worked_minutes, 0.0);
-    assert_eq!(survival10(&w).seats[2].rice, 0);
+    assert_eq!(survival10(&w).seats[2].rice, 1);
 
     // 4 号真实走到粮仓，做「取粮」；动作完成那一刻立即到账。
     walk(&mut w, &ids[3], "take-goto", "loc_c");
@@ -2064,26 +3383,37 @@ fn survival10_day_actions_follow_real_work_and_granary_visits() {
     )
     .unwrap();
     w.step(9.0);
-    assert_eq!(survival10(&w).seats[3].rice, 0, "取粮还没完成");
+    assert_eq!(survival10(&w).seats[3].rice, 1, "取粮还没完成");
     w.step(2.0);
     let v = survival10(&w);
-    assert_eq!(v.seats[3].rice, 1, "取粮完成才到账");
+    assert_eq!(v.seats[3].rice, 2, "取粮完成才到账");
     assert_eq!(v.public_rice, public - 1, "到账同时从公仓扣除");
 
     while survival10(&w).phase == Survival10Phase::Day {
         w.step(30.0);
     }
-    assert_eq!(survival10(&w).produced_today, 1, "只计实际工作满八小时的人");
+    assert_eq!(
+        survival10(&w).produced_today,
+        3,
+        "后台按报名结算，实际劳动进度不影响产粮"
+    );
+    assert_eq!(survival10(&w).public_rice, public - 1 + 3);
     // 存档重开：阶段、劳动和已领取的米仍在。
     let mut fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
     place_survival10_real_props(&mut fresh, true);
-    let restored = common::restore(&w, fresh);
+    let mut restored = common::restore(&w, fresh);
     let r = survival10(&restored);
     assert_eq!(r.phase, survival10(&w).phase);
+    assert_eq!(r.public_rice, survival10(&w).public_rice);
     assert!(r
         .seats
         .iter()
         .all(|s| s.rice == survival10(&w).seats[s.seat as usize - 1].rice));
+    restored.step(1.0);
+    assert_eq!(
+        survival10(&restored).public_rice,
+        survival10(&w).public_rice
+    );
 }
 
 #[test]
@@ -2305,6 +3635,239 @@ fn survival10_four_daily_registrations_work_in_parallel_and_survive_reload() {
     assert_eq!(survival10(&w).registered_today, 1);
 }
 
+/// 偷同一目标的真实取粮区间重叠，多方都不转账；先后完成、不同目标仍能正常取得。
+/// 判定在后到的动作开始时统一完成，先开始的人也不能先拿米。
+#[test]
+fn survival10_overlapping_theft_collides_before_any_rice_moves() {
+    for home in [false, true] {
+        for order in [[0, 1], [1, 0]] {
+            let (mut w, ids) = survival10_night_world(7);
+            w.test_give_rice(&ids[2], 3);
+            let (action, target, locale, prop) = if home {
+                (
+                    "steal_home",
+                    Some("3"),
+                    "test_3",
+                    "user:s10-home_pantry_v2_3",
+                )
+            } else {
+                ("steal_public", None, "loc_c", "granary")
+            };
+            for &seat in &order {
+                survival10_act(&mut w, &ids[seat], action, target).unwrap();
+                walk(&mut w, &ids[seat], "reach-target", locale);
+            }
+            let before = survival10(&w);
+            for (index, &seat) in order.iter().enumerate() {
+                common::run(
+                    &mut w,
+                    &ids[seat],
+                    "collect",
+                    json!({
+                        "intent": {"verb": "collect", "locale": locale}, "prop_id": prop
+                    }),
+                )
+                .unwrap();
+                w.step(if index == 0 { 4.0 } else { 1.0 });
+                let saved = serde_json::to_value(w.snapshot()).unwrap();
+                w.restore_snapshot(serde_json::from_value(saved).unwrap())
+                    .unwrap();
+            }
+            w.step(10.0);
+            for &seat in &order {
+                assert!(matches!(
+                    w.action_group(&ids[seat], "collect").unwrap().status,
+                    GroupStatus::Failed | GroupStatus::Interrupted
+                ));
+                assert!(notes(&w, &ids[seat])
+                    .iter()
+                    .any(|text| text.contains("偷粮撞车")));
+                assert!(common::run(
+                    &mut w,
+                    &ids[seat],
+                    "retry",
+                    json!({
+                        "intent": {"verb": "collect", "locale": locale}, "prop_id": prop
+                    })
+                )
+                .is_err());
+            }
+            let after = survival10(&w);
+            assert_eq!(after.public_rice, before.public_rice);
+            assert_eq!(
+                after.seats.iter().map(|seat| seat.rice).collect::<Vec<_>>(),
+                before
+                    .seats
+                    .iter()
+                    .map(|seat| seat.rice)
+                    .collect::<Vec<_>>()
+            );
+            assert!(!notes(&w, &ids[3])
+                .iter()
+                .any(|text| text.contains("偷粮撞车")));
+            walk(&mut w, &ids[order[0]], "leave-collision", "loc_b");
+            assert_eq!(w.actor(&ids[order[0]]).unwrap().locus.locale, "loc_b");
+        }
+    }
+}
+
+#[test]
+fn survival10_simultaneous_thefts_at_distinct_targets_conserve_rice() {
+    let (mut world, ids) = survival10_night_world(7);
+    for id in &ids[3..5] {
+        world.test_give_rice(id, 2);
+    }
+    let targets = [
+        ("steal_public", None, "loc_c", "granary"),
+        (
+            "steal_home",
+            Some("4"),
+            "test_4",
+            "user:s10-home_pantry_v2_4",
+        ),
+        (
+            "steal_home",
+            Some("5"),
+            "test_5",
+            "user:s10-home_pantry_v2_5",
+        ),
+    ];
+    for (seat, &(action, target, locale, _)) in targets.iter().enumerate() {
+        survival10_act(&mut world, &ids[seat], action, target).unwrap();
+        walk(&mut world, &ids[seat], "reach-target", locale);
+    }
+    for (seat, &(_, _, locale, prop)) in targets.iter().enumerate() {
+        common::run(
+            &mut world,
+            &ids[seat],
+            "collect",
+            json!({
+                "intent": {"verb": "collect", "locale": locale}, "prop_id": prop
+            }),
+        )
+        .unwrap();
+    }
+    world.step(11.0);
+    let view = survival10(&world);
+    assert_eq!(view.public_rice, 20);
+    assert!(view.seats[..3].iter().all(|seat| seat.rice == 1));
+    assert!(view.seats[3..5].iter().all(|seat| seat.rice == 1));
+    assert_eq!(
+        view.public_rice + view.seats.iter().map(|seat| seat.rice).sum::<u32>(),
+        25
+    );
+}
+
+/// 开局配给只在新局发生；晚餐照扣，保存重开甚至旧档里手写 0 袋也不会再补发。
+#[test]
+fn survival10_initial_ration_is_once_per_new_game() {
+    let (mut w, ids) = survival10_world(7.0 * HOUR);
+    let view = survival10(&w);
+    assert_eq!(view.public_rice, 21);
+    assert_eq!(view.seats.iter().map(|seat| seat.rice).sum::<u32>(), 7);
+    w.step(11.0 * HOUR);
+    let dinner = survival10(&w);
+    assert_eq!(dinner.phase, Survival10Phase::Night);
+    assert_eq!(dinner.seats.iter().map(|s| s.rice).sum::<u32>(), 0);
+    assert!(notes(&w, &ids[0])
+        .iter()
+        .any(|text| text.contains("开局配给每人1袋私粮")));
+    let people: Vec<_> = ids
+        .iter()
+        .map(|id| (id.as_str(), id.as_str(), "loc_a"))
+        .collect();
+    let fresh = common::world_with(common::tiny_topology(), 7.0 * HOUR, &people);
+    let mut restored = common::restore(&w, fresh);
+    assert!(survival10(&restored)
+        .seats
+        .iter()
+        .all(|seat| seat.rice == 0));
+    let mut legacy = serde_json::to_value(restored.snapshot()).unwrap();
+    for seat in legacy["game_mode"]["survival10"]["seats"]
+        .as_array_mut()
+        .unwrap()
+    {
+        seat["rice"] = json!(0);
+    }
+    restored
+        .restore_snapshot(serde_json::from_value(legacy).unwrap())
+        .unwrap();
+    assert!(survival10(&restored)
+        .seats
+        .iter()
+        .all(|seat| seat.rice == 0));
+}
+
+/// 守家登记后，下一晚既不在动作列表里、硬调也失败；失败、离家和重开都不能绕过。
+#[test]
+fn survival10_guard_cooldown_survives_reload_and_old_saves() {
+    let (mut w, ids) = survival10_night_world(3);
+    for id in &ids {
+        w.test_give_rice(id, 5);
+    }
+    survival10_act(&mut w, &ids[0], "guard_home", None).unwrap();
+    let mut legacy = serde_json::to_value(w.snapshot()).unwrap();
+    legacy["game_mode"]["survival10"]["seats"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("last_guard_day");
+    w.restore_snapshot(serde_json::from_value(legacy).unwrap())
+        .unwrap();
+    while survival10(&w).phase != Survival10Phase::Day {
+        w.step(30.0);
+    }
+    for _ in 0..100 {
+        if survival10(&w).phase == Survival10Phase::Night {
+            break;
+        }
+        if survival10(&w).phase == Survival10Phase::Speech {
+            let seat = survival10(&w).turn.unwrap() as usize - 1;
+            mode_act(
+                &mut w,
+                &ids[seat],
+                "speak",
+                None,
+                Some("我会权衡资源与信誉。"),
+            );
+        }
+        w.step(30.0);
+    }
+    let context = w.game_mode_context(&ids[0]).unwrap();
+    let GameModeContext::Survival10(context) = context else {
+        panic!("缺少玩法题面")
+    };
+    assert!(!context.actions.iter().any(|action| action == "guard_home"));
+    let rejected = survival10_act(&mut w, &ids[0], "guard_home", None).unwrap_err();
+    assert!(rejected.to_string().contains("上一晚已经登记守家"));
+    let people: Vec<_> = ids
+        .iter()
+        .map(|id| (id.as_str(), id.as_str(), "loc_c"))
+        .collect();
+    let mut fresh = common::world_with(survival10_real_topology(), 7.0 * HOUR, &people);
+    place_survival10_real_props(&mut fresh, true);
+    let mut restored = common::restore(&w, fresh);
+    assert!(survival10_act(&mut restored, &ids[0], "guard_home", None).is_err());
+    let cooldown = restored.snapshot();
+    let mut legacy = serde_json::to_value(restored.snapshot()).unwrap();
+    legacy["game_mode"]["survival10"]["seats"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("last_guard_day");
+    restored
+        .restore_snapshot(serde_json::from_value(legacy).unwrap())
+        .unwrap();
+    assert!(survival10_act(&mut restored, &ids[0], "guard_home", None).is_ok());
+    restored.restore_snapshot(cooldown).unwrap();
+    for _ in 0..100 {
+        if survival10(&restored).day == 3 && survival10(&restored).phase == Survival10Phase::Night {
+            break;
+        }
+        restored.step(30.0);
+    }
+    assert_eq!(survival10(&restored).day, 3);
+    assert!(survival10_act(&mut restored, &ids[0], "guard_home", None).is_ok());
+}
+
 /// 夜间目击只看取粮完成那一刻真正在场、醒着的人：两人都取到才互相看见，
 /// 只走了半路的人看不到；不相干的人收到的事只属于自己的经历。
 #[test]
@@ -2326,12 +3889,21 @@ fn survival10_night_witnesses_only_people_actually_there() {
     w.set_game_mode(Some(&GameModeChoice::Survival10 { seed: Some(7) }))
         .unwrap();
     w.test_move_granary("loc_c");
+    for id in &ids[2..] {
+        walk(&mut w, id, "leave-granary", "loc_b");
+    }
     w.step(HOUR);
     while survival10(&w).phase != Survival10Phase::Night {
         w.step(30.0);
     }
+    for id in ids.iter().skip(3) {
+        survival10_act(&mut w, id, "sleep", None).unwrap();
+    }
     for id in [&ids[0], &ids[1], &ids[2]] {
         survival10_act(&mut w, id, "steal_public", None).unwrap();
+    }
+    for id in &ids[2..] {
+        walk(&mut w, id, "stay-away", "loc_b");
     }
     // 1、2 号真的在粮仓取粮；3 号到粮仓后不取。
     for id in [&ids[0], &ids[1]] {

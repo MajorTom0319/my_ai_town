@@ -9,7 +9,8 @@ export const survival10Music: GameModeMusic<'survival10'> = {
     return null
   },
   sting(view, before) {
-    if (view.phase === 'speech' && before.phase !== 'speech') return 'tide-announce'
+    if ((view.phase === 'speech' || view.phase === 'last_words') && before.phase !== view.phase)
+      return 'tide-announce'
     if (view.revealed && !before.revealed) return 'tide-rise'
     return null
   },

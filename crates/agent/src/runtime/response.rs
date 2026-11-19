@@ -429,6 +429,10 @@ impl ResidentRuntime {
         if !thinking_done {
             return;
         }
+        if let Some(required) = world.game_mode_required_action(&s.actor_id) {
+            s.messages.push(Message::text(Role::User, required));
+            return;
+        }
         let delivered = s.cursors.delivered;
         retry::postpone(
             s,

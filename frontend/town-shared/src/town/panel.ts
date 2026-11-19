@@ -47,9 +47,12 @@ export function createTownPanel(deps: {
     createMiraclesSwitch(deps.world)
   )
   const recording = createRecordingSection(deps.world)
+  const autoSummary = deps.world.autoSummarySwitch()
+  const script = el('section', '', 'town-section town-manuscript-rules')
+  script.append(el('h3', '实时剧本'), autoSummary.el)
   const reset = createResetSection(deps.send, deps.townName)
   const body = el('div', '', 'town-panel-body')
-  body.append(worldview.el, rules, recording.el, reset.el)
+  body.append(worldview.el, rules, script, recording.el, reset.el)
   // 对话框本身没有内边距，内容占满它：点到对话框本身就是点在遮罩上
   const inner = el('div', '', 'town-panel-inner')
   inner.append(head, body)
@@ -59,6 +62,7 @@ export function createTownPanel(deps: {
   deps.world.subscribe(() => {
     const switches = deps.world.state()?.physiology
     physiologyState.textContent = switches ? physiologySummary(switches) : ''
+    autoSummary.render()
   })
 
   const dirty = () => worldview.isDirty() || physiology.isDirty()

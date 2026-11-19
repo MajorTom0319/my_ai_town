@@ -7,8 +7,8 @@ mod tide;
 mod werewolf;
 
 pub use survival10::{
-    Survival10Ballot, Survival10Context, Survival10Line, Survival10Phase, Survival10Seat,
-    Survival10View,
+    Survival10Ballot, Survival10Context, Survival10Disaster, Survival10DisasterNotice,
+    Survival10Farewell, Survival10Line, Survival10Phase, Survival10Seat, Survival10View,
 };
 pub use swordholder::{
     SwordholderBallot, SwordholderContext, SwordholderDecision, SwordholderEnding, SwordholderLine,
@@ -23,6 +23,17 @@ pub use werewolf::{
 };
 
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "event",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum GameModeEvent {
+    Survival10Disaster(Survival10Disaster),
+}
 
 /// 名册里随时间广播的玩法状态，前端按 kind 认出是哪个玩法。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

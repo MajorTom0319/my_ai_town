@@ -72,6 +72,16 @@ impl ResidentRuntime {
             failures.count = 1;
         }
         if failures.count >= SAME_FAILURE_BEFORE_POSTPONE {
+            if world.game_mode_required_action(&s.actor_id).is_some() {
+                self.pause_fault_for(
+                    world,
+                    s,
+                    format!("必需的玩法发言连续失败：{error}；请检查模型后继续"),
+                    None,
+                    crate::session::HoldCause::Other,
+                );
+                return;
+            }
             let cursor = world.actor(&s.actor_id).map_or(0, |a| a.journal.cursor());
             postpone(
                 s,

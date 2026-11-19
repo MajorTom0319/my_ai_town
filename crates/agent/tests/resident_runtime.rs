@@ -8,6 +8,91 @@ use agent::{
 use serde_json::json;
 
 #[test]
+fn required_game_speech_retries_thought_only_replies_and_never_fabricates_words() {
+    let mut world = world();
+    world.topo.locales.get_mut("loc_b").unwrap().name = "篝火广场".into();
+    world.set_physiology(protocol::PhysiologySwitches {
+        fullness: false,
+        energy: false,
+        water: false,
+        health: false,
+        weather: false,
+    });
+    for number in 2..=7 {
+        let id = format!("r{number}");
+        world.spawn(&id, &id, "loc_a").unwrap();
+    }
+    world
+        .set_game_mode(Some(&protocol::GameModeChoice::Survival10 {
+            seed: Some(1),
+        }))
+        .unwrap();
+    for number in 1..=7 {
+        world.test_give_rice(&format!("r{number}"), 10);
+    }
+    while !matches!(world.game_mode_view(), Some(protocol::GameModeView::Survival10(view)) if view.phase == protocol::Survival10Phase::Speech)
+    {
+        world.step(1.0);
+    }
+    let mut runtime = runtime(&mut world, Limits::default());
+    let first = request(&mut runtime, &mut world);
+    assert!(reply_with(
+        &mut runtime,
+        &mut world,
+        &first,
+        "我想公开说说粮食。",
+        vec![]
+    ));
+    assert!(runtime.session("r1").unwrap().sleep().is_none());
+    let second = request(&mut runtime, &mut world);
+    assert!(reply_with(
+        &mut runtime,
+        &mut world,
+        &second,
+        "等大家说完再说。",
+        vec![tool_call(
+            "invalid-wait",
+            "wait_for",
+            json!({"minutes":30,"reason":"等别人发言"})
+        )]
+    ));
+    assert!(runtime.session("r1").unwrap().pending.is_empty());
+    let speaking = request(&mut runtime, &mut world);
+    let words = "我今天没有领米，请大家核对自己的晚餐。";
+    assert!(reply_with(
+        &mut runtime,
+        &mut world,
+        &speaking,
+        words,
+        vec![tool_call(
+            "real-speech",
+            "mode_action",
+            json!({"action":"speak","text":words})
+        )]
+    ));
+    let protocol::GameModeView::Survival10(view) = world.game_mode_view().unwrap() else {
+        panic!("玩法")
+    };
+    assert_eq!(view.turn, Some(2));
+    assert_eq!(view.lines.len(), 1);
+    assert_eq!(view.lines[0].text, words);
+    assert!(world
+        .actor("r2")
+        .unwrap()
+        .journal
+        .events_after(0)
+        .iter()
+        .any(|fact| fact.kind == protocol::FactKind::Speech && fact.text.contains(words)));
+    assert!(!world
+        .actor("r1")
+        .unwrap()
+        .journal
+        .thoughts_today
+        .iter()
+        .any(|thought| thought.text == words));
+}
+
+#[test]
 fn outdated_replies_are_counted_and_two_revision_conflicts_in_a_row_stop_only_this_resident() {
     let mut w = world();
     let mut r = runtime(&mut w, Limits::default());

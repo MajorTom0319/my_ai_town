@@ -389,6 +389,11 @@ pub fn definitions(kind: RequestKind) -> Vec<Value> {
 
 pub fn execute(ctx: &mut ToolContext, call: &ToolCall) -> Result<ToolOutcome, ToolError> {
     let name: ToolName = call.name.parse()?;
+    if name == ToolName::WaitFor {
+        if let Some(required) = ctx.world.game_mode_required_action(&ctx.session.actor_id) {
+            return Err(ToolError::new(ToolErrorKind::InvalidArguments, required));
+        }
+    }
     (spec(name).exec)(ctx, call)
 }
 

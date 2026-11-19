@@ -9,8 +9,10 @@ const WORK_REQUIRED = 480
 const LABEL: Record<Survival10View['phase'], string> = {
   waiting: '等待开局',
   day: '白天行动',
+  gather: '篝火集合',
   speech: '篝火发言',
   vote: '记名投票',
+  last_words: '离场陈词',
   night: '夜间行动',
   jury: '陪审团',
   over: '终局',
@@ -98,6 +100,18 @@ export class Survival10Look implements GameModeLook {
       votes.textContent = `已交选票 ${v.ballots.length} 张（统一揭票）`
       details.append(votes)
     }
+    if ((v.phase === 'vote' || v.phase === 'jury') && v.revealed) {
+      const name = (seat: number) => v.seats.find((s) => s.seat === seat)?.name ?? `${seat}号`
+      const ballots = document.createElement('div')
+      ballots.className = 's10-ballots'
+      for (const ballot of [...v.ballots].sort((a, b) => a.voter - b.voter)) {
+        if (!ballot.target) continue
+        const row = document.createElement('span')
+        row.textContent = `${name(ballot.voter)} → ${name(ballot.target)}${ballot.automatic ? '（系统代投）' : ''}`
+        ballots.append(row)
+      }
+      if (ballots.childElementCount) details.append(ballots)
+    }
     const latest = v.lines.at(-1)
     if (latest) {
       const say = document.createElement('blockquote')
@@ -108,6 +122,17 @@ export class Survival10Look implements GameModeLook {
       const winner = document.createElement('strong')
       winner.textContent = `🏆 冠军：${v.seats.find((s) => s.seat === v.winner)?.name ?? v.winner}`
       details.append(winner)
+    }
+    for (const disaster of v.disasters ?? []) {
+      const notice = document.createElement('blockquote')
+      notice.textContent = `赛事天灾公告：${disaster.text}`
+      details.append(notice)
+    }
+    for (const farewell of v.farewells ?? []) {
+      const line = document.createElement('blockquote')
+      const name = v.seats.find((seat) => seat.seat === farewell.seat)?.name ?? farewell.seat
+      line.textContent = `${name}的离场陈词${farewell.target ? `（指认${farewell.target}号）` : ''}：${farewell.skipped ? '未留下陈词' : farewell.text}（当事人声明，非裁判认定；不转赠资源）`
+      details.append(line)
     }
     root.append(banner, board, details)
   }

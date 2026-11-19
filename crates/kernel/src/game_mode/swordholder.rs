@@ -410,6 +410,7 @@ impl Swordholder {
             occasion: occasion.into(),
             seat: Some(i as u32 + 1),
             text,
+            public: true,
         };
         let info = EventInfo::speech(&a.id, &a.name, speech);
         world.log(info, heard);

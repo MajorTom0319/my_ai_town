@@ -3176,6 +3176,7 @@
         "id": "collect",
         "label": "取粮",
         "duration_minutes": 10,
+        "concurrent": true,
         "completion": "activity"
       }
     ]
@@ -3200,6 +3201,7 @@
         "id": "collect",
         "label": "取粮",
         "duration_minutes": 10,
+        "concurrent": true,
         "completion": "activity"
       }
     ],

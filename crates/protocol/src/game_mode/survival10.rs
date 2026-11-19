@@ -1,13 +1,48 @@
 //! 聪明人小镇·十日生存：旁观者可以看到库存，Agent 只能收到属于自己的私有信息。
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Survival10Disaster {
+    Rats,
+    Freeze {
+        #[serde(default = "freeze_days")]
+        days: u32,
+    },
+    Flood,
+    Drought {
+        #[serde(default = "drought_days")]
+        days: u32,
+    },
+}
+
+fn freeze_days() -> u32 {
+    2
+}
+fn drought_days() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Survival10DisasterNotice {
+    pub id: u32,
+    pub at: f64,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_day: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_day: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Survival10Phase {
     Waiting,
     Day,
+    Gather,
     Speech,
     Vote,
+    LastWords,
     Night,
     Jury,
     Over,
@@ -47,11 +82,24 @@ pub struct Survival10Line {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Survival10Farewell {
+    pub seat: u32,
+    pub at: f64,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<u32>,
+    pub skipped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Survival10Ballot {
     pub voter: u32,
     /// 为防止抢先投票者影响其他人，揭票前为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<u32>,
+    /// 投票超时后由系统补投；与本人主动提交的票在揭票后分开显示。
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +122,10 @@ pub struct Survival10View {
     pub history: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub winner: Option<u32>,
+    #[serde(default)]
+    pub farewells: Vec<Survival10Farewell>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disasters: Vec<Survival10DisasterNotice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +138,9 @@ pub struct Survival10Context {
     pub my_rice: u32,
     #[serde(default)]
     pub worked_minutes: u32,
+    /// 当日劳动达标所需分钟，按真实有效劳动累计；旧档缺省时为八小时。
+    #[serde(default = "default_labor_minutes")]
+    pub labor_required_minutes: u32,
     #[serde(default)]
     pub registered_today: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,4 +151,8 @@ pub struct Survival10Context {
     pub history: Vec<String>,
     pub now: String,
     pub actions: Vec<String>,
+}
+
+fn default_labor_minutes() -> u32 {
+    480
 }

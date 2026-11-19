@@ -486,10 +486,13 @@ impl Werewolf {
         heard: String,
     ) {
         let a = &world.actors[&self.seats[i].id];
+        // 白天的议事与遗言对着游客公开；狼人夜里在频道里说，只进频道内的人的经历。
+        let public = occasion != "狼人频道";
         let speech = EventSpeech {
             occasion,
             seat: Some(i as u32 + 1),
             text,
+            public,
         };
         let info = EventInfo::speech(&a.id, &a.name, speech);
         world.log(info, heard);

@@ -261,6 +261,7 @@ pub fn book_placement(
             supply: None,
             recipient: false,
             rest: false,
+            concurrent: false,
             completion: if bulletin {
                 Completion::ReadBulletin
             } else {

@@ -200,6 +200,16 @@
   border-radius: 0 0 var(--r-s) var(--r-s);
 }
 
+/* 实时剧本：自动整理开关跟着这个世界保存；实录本身不受它影响 */
+.town-manuscript-rules {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.town-manuscript-rules .physiology-switches {
+  max-width: none;
+  gap: 6px;
+}
+
 /* 重置世界：平时收着，一行红字 */
 .town-reset {
   padding-top: 14px;

@@ -15,7 +15,13 @@ pub(super) fn note_thought(world: &mut World, actor: &str, kind: RequestKind, re
     let spoken = reply
         .calls
         .iter()
-        .filter_map(|c| c.arguments["message"].as_str())
+        .filter_map(|call| {
+            call.arguments["message"].as_str().or_else(|| {
+                (call.name == "mode_action" && call.arguments["action"] == "speak")
+                    .then(|| call.arguments["text"].as_str())
+                    .flatten()
+            })
+        })
         .any(|message| echoes(thought, message));
     if spoken {
         return;

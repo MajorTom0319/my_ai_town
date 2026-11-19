@@ -331,7 +331,7 @@ impl ResidentRuntime {
 
     /// 轮到本人发言时立即唤醒；同一动作版本只唤醒一次。
     fn wake_for_chat_turn(&self, world: &World, s: &mut Session) {
-        if !world.chat_turn(&s.actor_id) {
+        if !world.chat_turn(&s.actor_id) && world.game_mode_required_action(&s.actor_id).is_none() {
             return;
         }
         let revision = world.actor(&s.actor_id).map_or(0, |a| a.actions.revision);
@@ -386,6 +386,9 @@ impl ResidentRuntime {
         s.daily.new_day(day);
         let limits = self.state.limits.clone();
         if s.wake_calls() >= limits.calls_per_wake {
+            if world.game_mode_required_action(&s.actor_id).is_some() {
+                return Err(AgentError::Context("必需的玩法发言未完成，已达到本次调用上限；请检查模型后继续，不会以想法代替发言或跳过本人".into()));
+            }
             retry::postpone(s, now, "本次唤醒达到调用上限", false, cursor);
             self.record(world, s, Trace::new("wait", json!(s.sleep())));
             return Ok(None);
@@ -431,7 +434,9 @@ impl ResidentRuntime {
         }
         // 不在交谈轮次说明交谈已结束，本场对话记录不再需要。
         s.chat = Default::default();
-        if !world.interactions().has_talk_invitation(&s.actor_id) {
+        if world.game_mode_required_action(&s.actor_id).is_none()
+            && !world.interactions().has_talk_invitation(&s.actor_id)
+        {
             if let Some(batch) = crate::notebook::plan_reflection(world, s) {
                 let docs = self.docs(world, s);
                 let fitted = reflection::fit_reflection(
@@ -864,7 +869,8 @@ fn wants_request(world: &World, s: &Session) -> bool {
     // 交谈的成员和同行里跟着走的人占着活动，只在轮到自己说话时想；带路人边走边说也是轮到才想。
     let turn = world.chat_turn(&s.actor_id);
     a.actions.agent_controlled
-        && a.present()
+        && world.game_mode_allows_decision(&s.actor_id)
+        && (a.present() || world.game_mode_offstage_action(&s.actor_id))
         && a.possession.is_none()
         && !a.needs.incapacitated()
         && ((a.current.action.is_none() && idle) || responding || turn)
