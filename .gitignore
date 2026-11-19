@@ -19,6 +19,7 @@ logs/
 /dist-island/
 /dist-research/
 /.local/
+/.local-apply-director.sh
 /AI小镇启动.exe
 *.log
 
