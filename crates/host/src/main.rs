@@ -3,7 +3,7 @@
 //! cargo run -p host -- [--mock-llm [--mock-delay 3]]
 //!   [--port 8787] [--speed 1.0] [--map-document data/maps/2d-town/map.json]
 //!   [--save-file 路径 | --no-save] [--town-id ID] [--ready-file 路径] [--connection-token 标识]
-//!   [--stop-on-stdin-close]
+//!   [--stop-on-stdin-close] [--autosave-seconds 30]
 //!
 //! 村民由 Agent 会话驱动；旧的无会话存档由 Agent 接续。
 //! 模型和玩家的动作都走内核命令校验。
@@ -17,8 +17,10 @@ mod join;
 mod library_commands;
 mod manuscript;
 mod network;
+mod prefab_commands;
 mod prop_commands;
 mod recording_commands;
+mod resident_detail;
 mod resident_driver;
 mod runtime;
 mod settings;
@@ -59,7 +61,7 @@ fn run() -> Result<(), HostError> {
     let app = Application::load()?;
     let args = Args::parse(&app)?;
     if args.stop_on_stdin_close {
-        host::process::stop_when_stdin_closes();
+        host::process::stop_with_parent();
     }
     let path = args.map_document.as_deref().unwrap_or(&app.topology_path);
     let source = std::fs::read_to_string(path)
@@ -182,6 +184,9 @@ fn build_runtime(
             )
         })
         .transpose()?;
+    if let (Some(store), Some(interval)) = (&mut store, args.autosave) {
+        store.set_autosave(interval);
+    }
     let saved = restore(&mut store, &mut world)?;
     let director_saved = saved.director.clone();
     host::maps::walk::restore_prop_positions(&mut world, args.save_file.as_deref())?;
@@ -273,6 +278,7 @@ fn build_runtime(
         director_pending_persist: false,
         director_props_changed: false,
         mode: args.mode.clone(),
+        watchers: Default::default(),
     })
 }
 
@@ -318,13 +324,37 @@ fn serve(mut runtime: Runtime, args: &Args, map_hash: String) -> Result<(), Host
         runtime.tape.clone(),
     )?;
     runtime.resume_recording();
+    let control = args
+        .shutdown_token
+        .clone()
+        .map(host::shutdown::Control::listen)
+        .transpose()
+        .map_err(|e| HostError::Runtime(format!("启动关闭通道失败：{e}")))?;
     if let Some(path) = &args.ready_file {
-        let ready = serde_json::json!({"pid":std::process::id(),"port":port,"identity":identity});
+        let ready = serde_json::json!({"pid":std::process::id(),"port":port,"identity":identity,
+            "shutdown_port":control.as_ref().map(|c| c.port)});
         host::persistence::atomic_write(path, ready.to_string().as_bytes())?;
     }
     let tick = Duration::from_millis(100);
-    while !host::process::stopping() {
+    loop {
         let start = Instant::now();
+        let mut request = control.as_ref().and_then(|c| c.next());
+        let stop = host::process::take_stop_request() || host::process::parent_gone();
+        if stop || request.is_some() {
+            // 最后一次抓取、提交与回执之间绝不处理玩家命令、推进或模型结果。
+            // 失败仍持有整个 Runtime 和存档锁；修复磁盘后同一世界可以重试。
+            let saved = runtime.checkpoint(true).is_ok();
+            let acknowledged = request
+                .as_mut()
+                .is_none_or(|stream| host::shutdown::reply(stream, saved).is_ok());
+            if saved && (acknowledged || host::process::parent_gone()) {
+                break;
+            }
+            if host::process::parent_gone() {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        }
         for _ in 0..COMMANDS_PER_TICK {
             let Ok(command) = commands.try_recv() else {
                 break;
@@ -342,7 +372,6 @@ fn serve(mut runtime: Runtime, args: &Args, map_hash: String) -> Result<(), Host
     if let Err(error) = runtime.tape.stop() {
         eprintln!("[host] 收起录像失败：{error}");
     }
-    runtime.checkpoint(true)?;
     println!("[host] 已保存并退出：{}", runtime.world.clock());
     Ok(())
 }

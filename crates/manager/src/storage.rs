@@ -1,12 +1,26 @@
-//! 小镇目录：每个小镇一份地图副本与它的存档与日志。与 scripts/towns/storage.mjs 同构。
+//! 小镇目录：每个小镇一份地图副本与它的存档与日志。
 use crate::error::ApiError;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// 应用发布的默认地图。
-pub const BUILTIN_MAP: &str = "data/maps/2d-town/map.json";
-pub const BUILTIN_TOWN: &str = "default-town";
+/// 随应用发的内置小镇：（编号, 应用自带的地图）。第一次运行时放进用户目录，不能删；名称和简介跟随应用版本。
+/// 列表里按这个顺序排在最前。
+pub const BUILTIN_TOWNS: [(&str, &str); 3] = [
+    ("default-town", "data/maps/2d-town/map.json"),
+    ("spring-valley", "data/maps/spring-valley/map.json"),
+    ("broken-towers", "data/maps/broken-towers/map.json"),
+];
+/// 应用发布的默认地图（世界服务没指定地图时用它）。
+pub const BUILTIN_MAP: &str = BUILTIN_TOWNS[0].1;
+
+/// 内置小镇自带的地图；不是内置小镇时为空。
+fn builtin_map(id: &str) -> Option<&'static str> {
+    BUILTIN_TOWNS
+        .iter()
+        .find(|(town, _)| *town == id)
+        .map(|(_, map)| *map)
+}
 
 pub struct Storage {
     /// 用户数据目录：towns/、config/。
@@ -65,8 +79,8 @@ pub fn check_identity(document: &Value) -> Result<(), ApiError> {
 }
 
 /// 一句话建镇时的描述、世界观建议和推荐的居民，和小镇放在一起（creation.json）：换设备、换成电脑版
-/// 打开也还在。逐步设置的小镇没有这个文件。从预制小镇开的一局另记 prefab（预制小镇的编号），进镇时按它
-/// 出开局设置。规则与电脑版（scripts/towns/storage.mjs 的 townCreation）相同。
+/// 打开也还在。逐步设置的小镇没有这个文件。从预制小镇开的一局另记 prefab（预制小镇的编号，见
+/// frontend/town-shared/src/prefabs），进镇时按它出开局设置。
 pub fn town_creation(value: &Value) -> Result<Option<Value>, ApiError> {
     if value.is_null() {
         return Ok(None);
@@ -152,19 +166,17 @@ impl Storage {
         Ok(self.root.join("towns").join(safe_id(id)?))
     }
 
-    /// 第一次运行时把默认地图放进用户目录。
+    /// 第一次运行时（以及应用新带了内置小镇时）把内置地图放进用户目录。
     pub fn init(&self) -> Result<(), ApiError> {
         fs::create_dir_all(self.root.join("towns"))?;
-        if self.town(BUILTIN_TOWN)?.join("map.json").exists() {
-            return Ok(());
+        for (id, map) in BUILTIN_TOWNS {
+            if self.town(id)?.join("map.json").exists() {
+                continue;
+            }
+            let document = read_json(&self.app.join(map))?;
+            self.create(id, &document, &json!({ "origin": "builtin" }), None)?;
         }
-        let document = read_json(&self.app.join(BUILTIN_MAP))?;
-        self.create(
-            BUILTIN_TOWN,
-            &document,
-            &json!({ "origin": "builtin" }),
-            None,
-        )
+        Ok(())
     }
 
     /// 新建一个小镇目录：地图和来源记录先写进临时目录，再整个改名，不会留下半个小镇。
@@ -251,14 +263,13 @@ impl Storage {
     /// 名称、简介和建镇说明。内置小镇的名称与简介跟随应用版本；小镇目录里的地图副本不改，
     /// 它的摘要是存档身份。一句话建的小镇，简介写玩家当时那句话。
     pub fn labels(&self, id: &str, document: &Value) -> (String, String, Value) {
-        let builtin = id == BUILTIN_TOWN;
-        let source = if builtin {
-            read_json(&self.app.join(BUILTIN_MAP)).unwrap_or_else(|_| document.clone())
-        } else {
-            document.clone()
+        let builtin = builtin_map(id);
+        let source = match builtin {
+            Some(map) => read_json(&self.app.join(map)).unwrap_or_else(|_| document.clone()),
+            None => document.clone(),
         };
         let text = |key: &str| source[key].as_str().unwrap_or_default().to_owned();
-        let creation = if builtin {
+        let creation = if builtin.is_some() {
             Value::Null
         } else {
             self.creation(id)
@@ -280,9 +291,9 @@ impl Storage {
             .unwrap_or_else(|| id.to_owned())
     }
 
-    /// 内置小镇：随应用发的 default-town，和预制玩法的 prefab-<编号>（第一次选中时生成，只能重新开始）
+    /// 内置小镇：随应用发的（BUILTIN_TOWNS），和预制玩法的 prefab-<编号>（第一次选中时生成，只能重新开始）
     pub fn can_delete(&self, id: &str) -> bool {
-        id != BUILTIN_TOWN && !id.starts_with("prefab-")
+        builtin_map(id).is_none() && !id.starts_with("prefab-")
     }
 
     /// reset：重新开始预制小镇，允许删掉内置的 prefab-<编号>
@@ -306,8 +317,8 @@ impl Storage {
         Ok(())
     }
 
-    /// 小镇列表上的进度：玩到第几天、住了几个人。读存档 world.json，还没开始过的小镇是 null。
-    /// 电脑上的管理服务（scripts/towns/storage.mjs）按同样的规则算，两边的 /api/towns 保持一致。
+    /// 小镇列表上的进度：玩到第几天、住了几个人，停在几点、什么天气，住着谁（按入住先后，最多 8 位，
+    /// 带名字和长相，选镇页画头像用）。读存档 world.json，还没开始过的小镇是 null。
     fn progress(&self, id: &str) -> Value {
         #[derive(serde::Deserialize)]
         struct Save {
@@ -318,23 +329,50 @@ impl Storage {
         #[derive(serde::Deserialize)]
         struct SaveWorld {
             minutes: f64,
+            #[serde(default)]
+            weather: Value,
         }
         #[derive(serde::Deserialize)]
         struct SavePopulation {
             #[serde(default)]
-            residents: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
+            residents: std::collections::BTreeMap<String, Value>,
         }
         let path = self.root.join("towns").join(id).join("world.json");
         let Ok(text) = fs::read(path) else {
             return Value::Null;
         };
-        match serde_json::from_slice::<Save>(&text) {
-            Ok(save) => json!({
-                "day": (save.world.minutes / 1440.0).floor() as i64 + 1,
-                "residents": save.population.map_or(0, |p| p.residents.len()),
-            }),
-            Err(_) => Value::Null,
-        }
+        let Ok(save) = serde_json::from_slice::<Save>(&text) else {
+            return Value::Null;
+        };
+        let weather = &save.world.weather;
+        let kind = (weather["status"] == "enabled")
+            .then(|| weather["weather"]["view"]["kind"].as_str())
+            .flatten()
+            .unwrap_or("clear");
+        // 存档里按编号排好了；再按入住先后排（稳定排序，先后相同的仍按编号）
+        let mut residents: Vec<Value> = save
+            .population
+            .map(|p| p.residents.into_values().collect())
+            .unwrap_or_default();
+        residents.sort_by_key(|r| r["order"].as_u64().unwrap_or(0));
+        let cast: Vec<Value> = residents
+            .iter()
+            .take(8)
+            .map(|r| {
+                json!({
+                    "name": r["name"].as_str().unwrap_or_default(),
+                    "template_id": r.get("template_id").cloned().unwrap_or(Value::Null),
+                    "look": r["appearance"].get("look").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        json!({
+            "day": (save.world.minutes / 1440.0).floor() as i64 + 1,
+            "residents": residents.len(),
+            "minutes": save.world.minutes.floor() as i64,
+            "weather": kind,
+            "cast": cast,
+        })
     }
 
     pub fn list(&self) -> Result<Vec<Value>, ApiError> {
@@ -375,11 +413,17 @@ impl Storage {
             }
         }
         towns.sort_by(|a, b| {
-            // 自带的小镇、预制小镇，再是玩家建的
-            let rank = |t: &Value| match t["id"].as_str() {
-                Some(BUILTIN_TOWN) => 0,
-                Some(id) if id.starts_with("prefab-") => 1,
-                _ => 2,
+            // 自带的小镇（按名单）、预制小镇，再是玩家建的
+            let rank = |t: &Value| {
+                let id = t["id"].as_str().unwrap_or_default();
+                BUILTIN_TOWNS
+                    .iter()
+                    .position(|(town, _)| *town == id)
+                    .unwrap_or(if id.starts_with("prefab-") {
+                        BUILTIN_TOWNS.len()
+                    } else {
+                        BUILTIN_TOWNS.len() + 1
+                    })
             };
             rank(a)
                 .cmp(&rank(b))

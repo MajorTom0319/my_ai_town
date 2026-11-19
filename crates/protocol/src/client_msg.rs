@@ -80,6 +80,19 @@ pub enum ClientMsg {
         offset: usize,
     },
     GetWorldSettings,
+    BeginPrefabSetup {
+        request_id: String,
+        world_id: String,
+        setup_id: String,
+        expected_revision: u64,
+        plan: crate::PrefabSetupPlan,
+    },
+    AdvancePrefabSetup {
+        request_id: String,
+        world_id: String,
+        setup_id: String,
+        next_step: usize,
+    },
     SetWorldview {
         request_id: String,
         world_id: String,
@@ -143,6 +156,13 @@ pub enum ClientMsg {
         world_id: String,
         #[serde(default)]
         game_mode: Option<crate::GameModeChoice>,
+    },
+    /// 玩家管理正在进行的玩法；与居民的 mode_action 分开鉴权和结算。
+    /// 回 WorldSettingsSaved，成功后广播名册；不打开新玩法，也不冒充居民。
+    GameModeControl {
+        request_id: String,
+        world_id: String,
+        command: crate::GameModeAction,
     },
     GetProps,
     Content {
@@ -237,6 +257,12 @@ pub enum ClientMsg {
     },
     /// 读村民设定（回 AgentConfig）
     GetAgentConfig {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resident: Option<String>,
+    },
+    /// 说自己在看哪位村民的角色卡细节（回 ResidentDetail，之后细节变了再发）；不带 resident 是不看了。
+    /// 一条连接同时只看一位；连接断了世界就不记得，重连后要再说一遍。
+    WatchResident {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resident: Option<String>,
     },
@@ -358,6 +384,13 @@ pub enum ClientMsg {
         request_id: String,
         limits: AgentLimits,
     },
+    /// 读 Agent 轨迹日志的开关和这个小镇的日志用了多少（回 AgentTrace）
+    GetAgentTrace,
+    /// 轨迹日志记不记完整题面：跟着这台设备，即时生效；回执是 ConfigSaved，随后广播 AgentTrace
+    SetAgentTrace {
+        request_id: String,
+        full_prompts: bool,
+    },
     /// 对导演说一句话：导演按一句话里的要求调用世界命令。回执是 AgentSaved（记下来了），
     /// 结果随后以 DirectorReply 广播。世界没设定好、导演已关或在等上一条回复时拒绝。
     DirectorSay {
@@ -396,6 +429,8 @@ impl ClientMsg {
             SetWeather { request_id, .. }
             | Avatar { request_id, .. }
             | GetChatHistory { request_id, .. }
+            | BeginPrefabSetup { request_id, .. }
+            | AdvancePrefabSetup { request_id, .. }
             | SetWorldview { request_id, .. }
             | SetPhysiology { request_id, .. }
             | SetClimate { request_id, .. }
@@ -405,6 +440,7 @@ impl ClientMsg {
             | DeleteRecording { request_id, .. }
             | SetStrangers { request_id, .. }
             | SetGameMode { request_id, .. }
+            | GameModeControl { request_id, .. }
             | Content { request_id, .. }
             | ValidateProp { request_id, .. }
             | SaveProp { request_id, .. }
@@ -429,6 +465,7 @@ impl ClientMsg {
             | GetNotebook { request_id, .. }
             | GetNotebookDetail { request_id, .. }
             | SetAgentLimits { request_id, .. }
+            | SetAgentTrace { request_id, .. }
             | DirectorSay { request_id, .. }
             | SummarizeManuscript { request_id, .. } => Some(request_id),
             JoinResident { op_id, .. } | GetResidentJoinResult { op_id, .. } => Some(op_id),
@@ -438,6 +475,7 @@ impl ClientMsg {
             | GetProps
             | GetModelConfig
             | GetAgentConfig { .. }
+            | WatchResident { .. }
             | GetPopulation
             | GetUsage
             | GetResidentLibrary { .. }
@@ -447,7 +485,8 @@ impl ClientMsg {
             | GetDiary { .. }
             | GetDirectorState
             | GetManuscript { .. }
-            | GetAgentLimits => None,
+            | GetAgentLimits
+            | GetAgentTrace => None,
         }
     }
 }

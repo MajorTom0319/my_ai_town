@@ -3,6 +3,7 @@ import type { PlaceGrid, RosterMember, ServerMsg } from './protocol'
 import type { PropCatalog, PropView } from './props/types'
 import type { Insets } from './mapView'
 import type { DepthBlur, Quality } from './quality'
+import type { WeatherKind } from './weather/types'
 export type ResidentEntry = { locale: string; member: RosterMember }
 /** 居民在屏幕上的范围（CSS 像素）：脚底点的 x 与 y、头顶的 y、身体半宽 */
 export interface ScreenBox {
@@ -88,6 +89,9 @@ export interface DirectorCamera {
 export interface GameMap {
   /** 地图会画天气：外壳才显示天气控件 */
   readonly weatherSupported?: boolean
+  /** 选镇页赏景（不连世界的预览）：画面换成这个时刻（游戏分钟）和天气。只换画面，
+   *  地面湿度、积雪几秒内跟上天气，不按游戏分钟累积 */
+  setScenery?(minutes: number, weather: WeatherKind): void
   readonly avatarSupported?: boolean
   /** 化身可挑的几套外观；有就在进入对话框里挑外观，没有就挑颜色 */
   avatarLooks?(): AvatarLook[]
@@ -146,6 +150,13 @@ export interface GameMap {
   setViewInsets?(insets: Insets): void
   /** 画面加载完（2D 的立体场景建好或退回平面图）；之前只有底色和地名 */
   ready?: Promise<void>
+  /** 镇中心在哪（地图坐标）：最大的那片有名字的广场，没有广场时是全镇的正中间。选镇页的镜头对准它 */
+  townHeart?(): [number, number]
+  /** 拍一张全镇的小图当封面（JPEG 的 data URL）：机位临时摆成正面看全镇、不带失焦模糊，拍完摆回去，
+   *  屏幕上看不出来。只有立体场景能拍，否则返回 undefined */
+  cover?(width: number, height: number): string | undefined
+  /** 此刻的画面（JPEG 的 data URL），宽不超过 maxWidth。进镇时拍下来，游戏页加载时垫在下面 */
+  still?(maxWidth: number): string | undefined
   onVillagerClick: ((id: string) => void) | null
   /** 没在摆道具时点了空地（控制化身时 onAvatarWalkTo 同时收到走过去的目标） */
   onGroundClick?: (() => void) | null

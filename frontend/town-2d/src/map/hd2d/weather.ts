@@ -12,11 +12,14 @@ import { hashNoise } from './glsl'
 import { REFLECTION_SKIP, wetReflection, type Reflection } from './reflection'
 
 // 立体场景里的天气：雨丝、落地水花、雪花、落叶是场景里的粒子；地面变湿、积水、积雪、云影和树随风摆
-// 是给地面、屋顶、树的材质补的一段着色器。天气强度几秒内平滑过渡；湿度和积雪按游戏时间累积和消退。
+// 是给地面、屋顶、树的材质补的一段着色器。天气强度几秒内平滑过渡；湿度和积雪按游戏时间累积和消退
+// （选镇页赏景时没有世界时钟，改按真实秒数跟上天气，见 followScenery）。
 // 尊重天气设置：关掉特效只留光照和湿度积雪，画质低只留雨雪，减少动画时不落雨雪不摇树，闪光开了才打闪电。
 
 /** 天气切换时各项强度每秒追上的比例，约 4 秒完成 */
 const BLEND = 0.8
+/** 赏景时地面湿度、积雪每秒追上的比例：比雨雪慢一点，约 6 秒到位 */
+const GROUND_BLEND = 0.55
 /** 湿透和变干、积雪和融化各需要的游戏分钟 */
 const WET_MINUTES = 20
 const DRY_MINUTES = 150
@@ -221,6 +224,8 @@ ${hashNoise('weather')}`
 export interface SurfaceWeather {
   /** 积雪程度的倍数：朝上的面才积，树冠只积一半 */
   snow: number
+  /** 可选的积雪比例纹理（R 通道，沿材质贴图 UV）；由调用方管理生命周期。 */
+  snowMap?: THREE.Texture
   /** 变湿变深的倍数 */
   wet: number
   /** 随风摇摆（树） */
@@ -263,6 +268,8 @@ export class Weather3D {
   private minutes: number | null = null
   private wet = 0
   private snowCover = 0
+  /** 赏景：湿度和积雪不看游戏时钟，每帧按真实秒数往当前天气走 */
+  private scenery = false
   private nextFlash = 0
   private flashAt = -1
   /** 闪电的亮度，0..1，由场景加到日光上 */
@@ -384,13 +391,19 @@ export class Weather3D {
     this.started = true
   }
 
+  /** 选镇页赏景：时刻和天气是玩家拖着选的，没有经过的游戏时间可以累积。之后湿度和积雪在 step 里
+   *  按真实秒数跟上天气（下雪 6 秒左右积满，放晴慢慢化），setClock 不再累积 */
+  followScenery() {
+    this.scenery = true
+  }
+
   /** 按游戏时间累积湿度和积雪；第一次拿到时钟时按当前天气直接给定 */
   setClock(minutes: number) {
     const t = WEATHER_LEVELS[this.kind]
     if (this.minutes === null) {
       this.wet = t.rain > 0 ? 1 : 0
       this.snowCover = t.snow > 0 ? 1 : 0
-    } else {
+    } else if (!this.scenery) {
       const d = Math.max(0, Math.min(60, minutes - this.minutes))
       this.wet =
         t.rain > 0
@@ -460,6 +473,7 @@ export class Weather3D {
         uWetFactor: { value: surface.wet },
         uSway: { value: surface.sway ? 1 : 0 },
       })
+      if (surface.snowMap) shader.uniforms.uSnowMap = { value: surface.snowMap }
       shader.vertexShader = (SHADE_VERTEX_HEAD + '\n' + shader.vertexShader)
         .replace(
           '#include <begin_vertex>',
@@ -473,7 +487,12 @@ export class Weather3D {
           vWeatherPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
           vWeatherUp = normalize(mat3(modelMatrix) * objectNormal).y;`
         )
-      shader.fragmentShader = (SHADE_FRAGMENT_HEAD + '\n' + shader.fragmentShader)
+      shader.fragmentShader = (
+        SHADE_FRAGMENT_HEAD +
+        (surface.snowMap ? '\nuniform sampler2D uSnowMap;' : '') +
+        '\n' +
+        shader.fragmentShader
+      )
         .replace(
           '#include <map_fragment>',
           `#include <map_fragment>
@@ -490,6 +509,14 @@ export class Weather3D {
             snowUp = mix(snowUp, smoothstep(0.55, 0.75, vMapUv.y), uSway);
           #endif
           float snowed = step(snowLevel, uSnow * 1.05 - 0.05) * snowUp * uSnowFactor;
+          ${
+            surface.snowMap
+              ? `#ifdef USE_MAP
+          // 清扫程度只乘积雪层，湿润、脚印与云影照常叠加。
+          snowed *= texture2D(uSnowMap, vMapUv).r;
+          #endif`
+              : ''
+          }
           // 雪地上踩出的脚印露出底下（踩踏图的 G，按像素格取）
           snowed *= 1.0 - step(0.3, texture2D(uTrail, ((snowP + 0.5) * ${f(PIXEL)} - uTrailOrigin) / uTrailSize).g);
           float under = dot(diffuseColor.rgb, vec3(0.3, 0.59, 0.11));
@@ -512,7 +539,7 @@ export class Weather3D {
         )
     }
     material.customProgramCacheKey = () =>
-      `${beforeKey}|weather:${surface.snow}:${surface.wet}:${surface.sway ? 1 : 0}`
+      `${beforeKey}|weather:${surface.snow}:${surface.wet}:${surface.sway ? 1 : 0}:${surface.snowMap ? 1 : 0}`
   }
 
   /** 风和时间的 uniform：草丛和别的随风东西共用同一份 */
@@ -627,6 +654,8 @@ export class Weather3D {
       if (Math.abs(target[key] - this.now[key]) < 0.002) this.now[key] = target[key]
       if ((key === 'cloud' || key === 'overcast') && this.now[key] !== before) lightChanged = true
     }
+    // 积雪、湿度也进打光（调色压蓝、草被埋、雾和彩虹），变了要重算
+    if (this.scenery && this.settleGround(dt, target)) lightChanged = true
     const effects = this.prefs.effects
     const moving = !this.prefs.reduceMotion && !this.reduceMotion.matches
     const counts = COUNTS[this.prefs.quality]
@@ -662,6 +691,24 @@ export class Weather3D {
     const changed = state !== this.lastState
     this.lastState = state
     return { light, changed }
+  }
+
+  /** 赏景时地面跟上天气：雨雪下起来一会儿（粒子到了三成）才开始湿、开始积，停了马上开始干、开始化。
+   *  返回这一帧变了没有 */
+  private settleGround(dt: number, target: WeatherLevels) {
+    const k = Math.min(1, dt * GROUND_BLEND)
+    const chase = (value: number, goal: number) => {
+      const next = value + (goal - value) * k
+      return Math.abs(goal - next) < 0.002 ? goal : next
+    }
+    const toward = (value: number, falling: number, aim: number) =>
+      aim === 0 ? chase(value, 0) : falling >= aim * 0.3 ? chase(value, 1) : value
+    const wet = toward(this.wet, this.now.rain, target.rain)
+    const snow = toward(this.snowCover, this.now.snow, target.snow)
+    const changed = wet !== this.wet || snow !== this.snowCover
+    this.wet = wet
+    this.snowCover = snow
+    return changed
   }
 
   /** 着色器和粒子用到的量，逐帧比较它判断画面有没有变 */

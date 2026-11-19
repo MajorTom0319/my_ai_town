@@ -266,19 +266,21 @@ interface WorldFact {
     previous_version: string | null
   }
 }
+/** 名册里每拍都带的 Agent 状态：画面和各面板判断用。目标、动作结果、互动和记着的事不在这里，
+ *  见 ResidentDetailView */
 export interface ResidentAgentView {
   state: AgentState
   reason: string
   /** 在等时等什么、最迟几点醒来；event 是哪类事件来了会提前醒，只按时间等时没有 */
   wait?: { reason: string; until: number; event?: FactKind }
-  daily_calls: number
-  daily_limit: number
-  daily_tokens: number
-  daily_input_tokens: number
-  daily_cache_hit_tokens: number
-  /** 生活决策回复累计数与其中因世界变化过时、未执行的数 */
-  replies: number
-  stale_replies: number
+  /** 最近定下或改过的进行中目标；换了，画面上这个人头上冒灯泡 */
+  latest_goal?: { id: string; updated_at: number }
+  /** 最近一次自己发起、被对方婉拒的邀请（编号）；换了，画面上这个人头上冒怒气 */
+  declined_invitation?: string
+}
+/** 角色卡「目标与记忆」里的细节。不随名册发：页面用 watch_resident 说了在看谁，世界才把那一位的
+ *  发来（resident_detail），之后变了再发 */
+export interface ResidentDetailView {
   goals: {
     id: string
     title: string
@@ -332,6 +334,8 @@ export interface ProviderView {
   name: string
   base_url: string
   key_mask: string
+  /** 「模型服务」里给这个服务填的模型名，选这个服务时自动填上；没填过为空串 */
+  model?: string
 }
 /** 外观：地图上的区分标记和像素小人的长相，旧存档可带形象编号 */
 export interface Appearance {
@@ -574,6 +578,20 @@ export interface AgentLimits {
   stale_replies_before_pause: number
   model_failures_before_pause: number
 }
+/** Agent 轨迹日志：开关跟着这台设备，日志按小镇放在小镇目录的 logs/ 里（host 的 agent_trace.rs） */
+export interface AgentTraceState {
+  /** 记不记每次请求的完整题面（整份 messages 和工具表）；不记时只记每轮新给的那条 */
+  full_prompts: boolean
+  /** 日志目录（绝对路径） */
+  dir: string
+  /** 这个小镇现有几份、共多少字节，连正在写的一份 */
+  files: number
+  bytes: number
+  /** 一份写到这么大换下一份 */
+  file_bytes: number
+  /** 每个小镇最多留这么大，超了先删最早的 */
+  keep_bytes: number
+}
 export interface ResidentUsage {
   id: string
   name: string
@@ -636,6 +654,42 @@ export interface PhysiologySwitches {
 }
 /** 气候：温带照天气规则的转移表；热带不下雪，转到雷暴的机会减半，淋雨湿得慢一半 */
 export type Climate = 'temperate' | 'tropical'
+/** 选择和执行计划随世界保存；恢复时不重新生成道具、居民或玩法配置。 */
+export interface PrefabSetupSelection {
+  players: number
+  models: (ModelChoice | null)[]
+  needs: boolean
+  picks: [string, string][]
+  seeds: [string, number][]
+}
+export type PrefabSetupStep =
+  | { kind: 'worldview'; text: string }
+  | { kind: 'physiology'; switches: PhysiologySwitches }
+  | { kind: 'climate'; climate: Climate }
+  | { kind: 'weather'; weather: WeatherKind }
+  | { kind: 'remove_prop'; id: string }
+  | { kind: 'place_prop'; instance: Instance; near?: { space: string; position: [number, number] } }
+  | { kind: 'limits'; limits: Partial<AgentLimits> }
+  | { kind: 'set_supply'; id: string; action: string; remaining: number }
+  | {
+      kind: 'join'
+      template_id: string
+      model?: ModelChoice
+      persona?: Omit<TemplateFields, 'appearance'> & { appearance?: Appearance }
+      look?: VillagerLook
+    }
+  | { kind: 'game_mode'; choice: GameModeChoice }
+export interface PrefabSetupPlan {
+  prefab: string
+  selection: PrefabSetupSelection
+  steps: PrefabSetupStep[]
+}
+export interface PrefabSetupState {
+  id: string
+  plan: PrefabSetupPlan
+  next_step: number
+  joined: string[]
+}
 export interface WorldSettingsState {
   world_id: string
   revision: number
@@ -660,6 +714,7 @@ export interface WorldSettingsState {
   strangers: boolean
   /** 开着的玩法（如 'tide'）；没开时没有这一项。随存档保存 */
   game_mode?: GameModeId
+  prefab_setup?: PrefabSetupState
 }
 
 /** 录下来的一卷：从开始录到停的一段。现实时刻是 Unix 毫秒，小镇时间写成时钟 */
@@ -682,6 +737,7 @@ export type GameModeView =
   | ({ kind: 'tide' } & TideView)
   | ({ kind: 'werewolf' } & WerewolfView)
   | ({ kind: 'swordholder' } & SwordholderView)
+  | ({ kind: 'frostlight' } & FrostlightView)
   | ({ kind: 'survival10' } & Survival10View)
 /** 打开哪个玩法、带什么设置；set_game_mode 不带它就是关掉 */
 export type GameModeChoice =
@@ -691,6 +747,76 @@ export type GameModeChoice =
   /** 执剑人之夜：seed 定下演说和表态的先后、平票时抽签；day_hours 是白天自由活动几小时（天亮到 16:30 敲钟） */
   | { kind: 'swordholder'; seed?: number; day_hours?: number }
   | { kind: 'survival10'; seed?: number }
+  | { kind: 'frostlight'; seed?: number; duration_hours?: number }
+
+export interface GameModeAction {
+  action: string
+  target?: string
+  text?: string
+  reason?: string
+}
+export type FrostlightPhase = 'preparation' | 'cold' | 'storm' | 'over'
+export interface FrostlightPolicies {
+  extended_shift: boolean
+  soup: boolean
+  mutual_aid: boolean
+}
+export interface FrostlightStation {
+  id: string
+  name: string
+  locale: string
+  available: number
+}
+export interface FrostlightWork {
+  kind: string
+  locale: string
+  ends_at: number
+}
+export interface FrostlightPerson {
+  id: string
+  name: string
+  role: string
+  contribution: number
+  work?: FrostlightWork
+  gone: boolean
+}
+export interface FrostlightNews {
+  at: number
+  text: string
+}
+export interface FrostlightEnding {
+  kind: string
+  title: string
+  text: string
+  survivors: number
+}
+export interface FrostlightView {
+  phase: FrostlightPhase
+  now: number
+  until: number
+  storm_at: number
+  ends_at: number
+  temperature: number
+  shelter_temperature: number
+  cold_minutes: number
+  hunger_minutes: number
+  unrest_minutes: number
+  fuel: number
+  food: number
+  materials: number
+  heat: number
+  stress: number
+  hope: number
+  discontent: number
+  insulation: number
+  generator: string
+  stations: FrostlightStation[]
+  policies: FrostlightPolicies
+  aid_used: boolean
+  people: FrostlightPerson[]
+  news: FrostlightNews[]
+  ending?: FrostlightEnding
+}
 
 /** 潮水圈里的一个圈：圆心和半径都是行走地图上的米（x 和地面上的 z） */
 export interface TideCircle {
@@ -988,6 +1114,13 @@ export type ServerMsg =
       environment: WeatherView | null
     }
   | { type: 'world_settings'; state: WorldSettingsState }
+  | {
+      type: 'prefab_setup_saved'
+      request_id: string
+      ok: boolean
+      message: string
+      state: PrefabSetupState | null
+    }
   | { type: 'world_settings_saved'; request_id: string; ok: boolean; message: string }
   | { type: 'props'; catalog: PropCatalog }
   | {
@@ -1078,6 +1211,9 @@ export type ServerMsg =
       request_id?: string
       generated?: boolean
     }
+  /** 角色卡细节：只发给说了在看这位村民的页面（watch_resident），说的时候一份，之后变了才发；
+   *  这位村民没有 Agent 会话时没有 detail */
+  | { type: 'resident_detail'; resident_id: string; detail?: ResidentDetailView }
   /**
    * 通用错误：命令无法执行、格式错误、读取失败或保存失败。request_id 是引起错误的命令自带的编号
    * （加入小镇是操作编号）；周期存盘失败这类不是由命令引起的错误没有。
@@ -1102,6 +1238,7 @@ export type ServerMsg =
       error: string | null
     }
   | { type: 'agent_limits'; limits: AgentLimits; ranges: AgentLimitRanges; usage: AgentUsage }
+  | { type: 'agent_trace'; state: AgentTraceState }
   | { type: 'population'; population: PopulationView }
   | {
       type: 'resident_appearance_saved'
@@ -1147,6 +1284,8 @@ export interface ProviderConfig {
   id: string
   name: string
   base_url: string
+  /** 这个服务记着的模型名；整表保存时要原样带回去，不带等于清掉 */
+  model?: string
 }
 export type ClientMsg =
   | {
@@ -1192,6 +1331,21 @@ export type ClientMsg =
     }
   | { type: 'get_world_settings' }
   | {
+      type: 'begin_prefab_setup'
+      request_id: string
+      world_id: string
+      setup_id: string
+      expected_revision: number
+      plan: PrefabSetupPlan
+    }
+  | {
+      type: 'advance_prefab_setup'
+      request_id: string
+      world_id: string
+      setup_id: string
+      next_step: number
+    }
+  | {
       type: 'set_worldview'
       request_id: string
       world_id: string
@@ -1223,6 +1377,12 @@ export type ClientMsg =
       request_id: string
       world_id: string
       game_mode?: GameModeChoice | null
+    }
+  | {
+      type: 'game_mode_control'
+      request_id: string
+      world_id: string
+      command: GameModeAction
     }
   | { type: 'get_props' }
   /** 导演：说一句，回 agent_saved 表示收到；结果随后以 director_reply 广播 */
@@ -1273,7 +1433,10 @@ export type ClientMsg =
       near?: { space: string; position: [number, number] }
     }
   | { type: 'set_speed'; request_id: string; speed: number }
-  | { type: 'get_model_config' | 'get_agent_limits' | 'get_population' | 'get_usage' }
+  | {
+      type:
+        'get_model_config' | 'get_agent_limits' | 'get_agent_trace' | 'get_population' | 'get_usage'
+    }
   | { type: 'reset_world'; request_id: string }
   | { type: 'get_resident_library'; filter: LibraryFilter }
   | {
@@ -1325,6 +1488,9 @@ export type ClientMsg =
     }
   | { type: 'get_resident_join_result'; world_id: string; op_id: string }
   | { type: 'get_agent_config' | 'get_diary'; resident?: string }
+  /** 说自己在看哪位村民的角色卡细节（回 resident_detail，之后变了再发）；不带 resident 是不看了。
+   *  一条连接同时只看一位，断线后世界不记得，重连要再说一遍 */
+  | { type: 'watch_resident'; resident?: string }
   | { type: 'get_notebook'; resident: string; request_id: string; query: NotebookQuery }
   | {
       type: 'get_notebook_detail'
@@ -1350,6 +1516,7 @@ export type ClientMsg =
     }
   | { type: 'set_persona'; request_id: string; resident: string; text: string }
   | { type: 'set_agent_limits'; request_id: string; limits: AgentLimits }
+  | { type: 'set_agent_trace'; request_id: string; full_prompts: boolean }
 
 type Life = 'alive' | 'dead'
 /** 生命历史里一条记录的来源 */

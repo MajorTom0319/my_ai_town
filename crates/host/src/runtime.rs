@@ -1,5 +1,6 @@
-//! 应用的命令分派与单拍顺序。保持命令 → 推进 → 模型结果 → roster 的原有时序。
+//! 应用的命令分派与单拍顺序。保持命令 → 推进 → 模型结果 → roster → 角色卡细节的时序。
 //! 客户端命令不能让进程退出：存盘失败只回错误回执并写日志，内存状态保留，下次检查点重试。
+//! 命令和事务当场存盘；世界自己往前走的进度（含模型回复）到点才存，写盘在后台线程。
 use crate::{
     join::JoinRequest,
     network::{broadcast, broadcast_event, send_to, Clients},
@@ -72,6 +73,8 @@ pub(crate) struct Runtime {
     pub director_props_changed: bool,
     /// 启动模式：固定回复、正式模型。
     pub mode: crate::startup::Mode,
+    /// 各连接在看哪位村民的角色卡细节（见 resident_detail.rs）
+    pub watchers: crate::resident_detail::Watchers,
 }
 
 /// 一条消息发给谁。
@@ -323,6 +326,25 @@ impl Runtime {
         if world_id_of(msg).is_some_and(|id| id != self.population.world_id) {
             return Some(self.rejection(msg, "世界已重置，请刷新页面后重试"));
         }
+        if self
+            .world_settings
+            .prefab_setup
+            .as_ref()
+            .is_some_and(|s| !s.complete())
+            && matches!(
+                msg,
+                ClientMsg::SetWorldview { .. }
+                    | ClientMsg::SetPhysiology { .. }
+                    | ClientMsg::SetClimate { .. }
+                    | ClientMsg::SetGameMode { .. }
+                    | ClientMsg::SetStrangers { .. }
+                    | ClientMsg::SetAgentLimits { .. }
+                    | ClientMsg::SetPersona { .. }
+                    | ClientMsg::SetResidentModel { .. }
+            )
+        {
+            return Some(self.rejection(msg, "预制开局尚未完成，请先继续开局设置"));
+        }
         if requires_ready(msg) && !self.world_settings.ready() {
             return Some(self.rejection(msg, "请先设置世界观"));
         }
@@ -345,6 +367,13 @@ impl Runtime {
                 };
                 self.weather_failed(request_id.clone(), code, message)
             }
+            ClientMsg::BeginPrefabSetup { request_id, .. }
+            | ClientMsg::AdvancePrefabSetup { request_id, .. } => ServerMsg::PrefabSetupSaved {
+                request_id: request_id.clone(),
+                ok: false,
+                message,
+                state: self.world_settings.prefab_setup.clone(),
+            },
             ClientMsg::SetWorldview { request_id, .. }
             | ClientMsg::SetPhysiology { request_id, .. }
             | ClientMsg::SetMiracles { request_id, .. }
@@ -353,7 +382,8 @@ impl Runtime {
             | ClientMsg::DeleteRecording { request_id, .. }
             | ClientMsg::SetStrangers { request_id, .. }
             | ClientMsg::SetGameMode { request_id, .. }
-            | ClientMsg::SetAutoSummary { request_id, .. } => ServerMsg::WorldSettingsSaved {
+            | ClientMsg::SetAutoSummary { request_id, .. }
+            | ClientMsg::GameModeControl { request_id, .. } => ServerMsg::WorldSettingsSaved {
                 request_id: request_id.clone(),
                 ok: false,
                 message,
@@ -420,6 +450,7 @@ impl Runtime {
             | ClientMsg::RestartBuiltinModel { .. }
             | ClientMsg::TestModelConnection { .. }
             | ClientMsg::GetAgentConfig { .. }
+            | ClientMsg::WatchResident { .. }
             | ClientMsg::SetPersona { .. }
             | ClientMsg::ResetWorld { .. }
             | ClientMsg::GetPopulation
@@ -436,7 +467,9 @@ impl Runtime {
             | ClientMsg::GetNotebook { .. }
             | ClientMsg::GetNotebookDetail { .. }
             | ClientMsg::GetAgentLimits
-            | ClientMsg::SetAgentLimits { .. } => error_msg(message),
+            | ClientMsg::SetAgentLimits { .. }
+            | ClientMsg::GetAgentTrace
+            | ClientMsg::SetAgentTrace { .. } => error_msg(message),
             // 导演指令不论卡在哪一步都用保存回执的形状回答：页面照常清输入框、报原因。
             ClientMsg::DirectorSay { request_id, .. } => ServerMsg::AgentSaved {
                 request_id: request_id.clone(),
@@ -480,6 +513,19 @@ impl Runtime {
                 Outcome::reply(error_msg("化身命令走专门的入口".into()))
             }
             GetWorldSettings => Outcome::reply(self.world_settings_msg()),
+            BeginPrefabSetup {
+                request_id,
+                setup_id,
+                expected_revision,
+                plan,
+                ..
+            } => self.begin_prefab_setup(request_id, setup_id, expected_revision, plan),
+            AdvancePrefabSetup {
+                request_id,
+                setup_id,
+                next_step,
+                ..
+            } => self.advance_prefab_setup(request_id, setup_id, next_step, clients),
             SetWorldview {
                 request_id,
                 expected_revision,
@@ -526,6 +572,11 @@ impl Runtime {
                 game_mode,
                 ..
             } => self.save_game_mode(request_id, game_mode),
+            GameModeControl {
+                request_id,
+                command,
+                ..
+            } => self.control_game_mode(request_id, &command),
             SetSpeed { speed, .. } => self.set_speed(speed, clients),
             ResetWorld { .. } => self.reset(),
             GetProps => Outcome::reply(self.props_message()),
@@ -661,6 +712,7 @@ impl Runtime {
                 clients,
             ),
             GetAgentConfig { resident } => self.agent_config(resident.as_deref()),
+            WatchResident { resident } => self.watch_resident(connection, resident),
             SetPersona {
                 request_id,
                 resident,
@@ -697,6 +749,11 @@ impl Runtime {
             GetAgentLimits => Outcome::reply(self.driver.limits_view(&self.world)),
             GetUsage => Outcome::reply(self.driver.usage_view(&self.world)),
             SetAgentLimits { request_id, limits } => self.set_agent_limits(request_id, limits),
+            GetAgentTrace => Outcome::reply(self.agent_trace_msg()),
+            SetAgentTrace {
+                request_id,
+                full_prompts,
+            } => self.save_agent_trace(request_id, full_prompts),
         }
     }
 
@@ -787,7 +844,8 @@ impl Runtime {
             .and_all(self.world_settings_msg())
     }
 
-    /// 一拍：推进世界、收模型结果、发新请求、广播 roster。存盘或轨迹写入失败只写日志，不中断运行。
+    /// 一拍：推进世界、收模型结果、发新请求、广播 roster，再给在看角色卡的连接补发变了的细节。
+    /// 存盘或轨迹写入失败只写日志，不中断运行。
     pub(crate) fn tick(&mut self, clients: &Clients) {
         self.director_tick();
         let directed = std::mem::take(&mut self.director_events);
@@ -800,7 +858,6 @@ impl Runtime {
         // 化身命令等在这拍开头报出的世界日志：本拍收进剧本，末了再广播。
         self.manuscript_pending
             .extend(self.manuscript.drain(&mut self.world));
-        let content_before = self.world.contents().revision();
         let inventory_before = self.world.inventory().revision();
         let missing = self.driver.missing_models(&self.population, &self.settings);
         self.driver.runtime.wait_for_models(&self.world, &missing);
@@ -815,26 +872,21 @@ impl Runtime {
             Vec::new()
         };
         self.manuscript_world_events(&events);
-        self.note_director_events(events);
+        self.note_director_events(events.clone());
+        self.driver.dispatch(&mut self.world, events, clients);
         self.director_run_scheduled();
-        let replied = match self.driver.receive(&mut self.world, clients) {
-            Ok(replied) => replied,
-            Err(error) => {
-                eprintln!("[host] {error}");
-                true
-            }
-        };
+        if let Err(error) = self.driver.receive(&mut self.world, clients) {
+            eprintln!("[host] {error}");
+        }
         let requests = self.driver.runtime.poll(&mut self.world, running);
-        let held = self.hold_if_needed(clients);
-        let changed = inventory_before != self.world.inventory().revision()
-            || content_before != self.world.contents().revision()
-            || std::mem::take(&mut self.director_pending_persist)
-            || replied
-            || held
-            || !requests.is_empty();
-        // 周期存盘失败只在刚开始失败时通知客户端，之后每拍重试、不重复刷屏。
+        self.hold_if_needed(clients);
+        if std::mem::take(&mut self.director_pending_persist) {
+            self.checkpoint_now();
+        }
+        // 周期存盘：到点才抓一份状态交给后台线程写，这一拍不等它。失败只在刚开始失败时通知
+        // 客户端，之后隔一会儿重试、不重复刷屏。
         let was_failing = self.save_failed;
-        if let Err(error) = self.checkpoint(changed) {
+        if let Err(error) = self.checkpoint(false) {
             if !was_failing {
                 broadcast(clients, &error_msg(kept_in_memory(&error)));
             }
@@ -856,6 +908,7 @@ impl Runtime {
             .extend(self.manuscript.drain(&mut self.world));
         self.auto_summarize_manuscript();
         broadcast(clients, &self.roster());
+        self.publish_details(clients);
         self.avatar_publish(clients);
         self.flush_director(clients);
         if self.director_props_changed {
@@ -909,13 +962,13 @@ impl Runtime {
     }
 
     /// 额度用尽、故障或回复接连过时：全镇停表并保留位置、活动和用量。
-    fn hold_if_needed(&mut self, clients: &Clients) -> bool {
+    fn hold_if_needed(&mut self, clients: &Clients) {
         if self.speed == 0.0 {
-            return false;
+            return;
         }
         let holds = self.town_holds();
         if holds.is_empty() {
-            return false;
+            return;
         }
         self.speed = 0.0;
         for hold in holds {
@@ -935,7 +988,6 @@ impl Runtime {
                 }));
             broadcast_event(clients, &self.world, text, info);
         }
-        true
     }
 
     /// 全镇暂停的原因，补上每位村民用的模型服务名，提示卡据此写「DeepSeek 的密钥用不了了」。
@@ -954,21 +1006,20 @@ impl Runtime {
         holds
     }
 
-    /// 存盘。失败时内存状态不动、返回存盘错误；只在失败与恢复的边界写日志。
-    pub(crate) fn checkpoint(&mut self, force: bool) -> Result<(), HostError> {
+    /// 存盘。`now` 为真：现在就存，写完才返回；为假：到点才存，写盘在后台（见 `SaveStore`）。
+    /// 失败时内存状态不动、返回存盘错误；只在失败与恢复的边界写日志。
+    pub(crate) fn checkpoint(&mut self, now: bool) -> Result<(), HostError> {
         let Some(store) = &mut self.store else {
             return Ok(());
         };
         let result = store.checkpoint_bundle(
-            host::persistence::Scene {
-                world: &self.world,
-                speed: self.speed,
-                world_settings: &self.world_settings,
-                population: Some(&self.population),
-                director: Some(self.director.save()),
-            },
-            || Some(self.driver.save()),
-            force,
+            &self.world,
+            self.speed,
+            &self.world_settings,
+            Some(&self.population),
+            Some(self.driver.runtime.state()),
+            now,
+            Some(self.director.save()),
         );
         match &result {
             Ok(true) if self.save_failed => {
@@ -982,6 +1033,16 @@ impl Runtime {
             _ => {}
         }
         result.map(|_| ())
+    }
+
+    /// 带上导演会话当场存盘；只用在导演这一拍收过轮次时，失败照旧只记在 `save_failed` 里。
+    fn checkpoint_now(&mut self) {
+        let was_failing = self.save_failed;
+        if let Err(error) = self.checkpoint(true) {
+            if !was_failing {
+                eprintln!("[host] {}", kept_in_memory(&error));
+            }
+        }
     }
 }
 
@@ -1022,7 +1083,7 @@ impl Runtime {
         self.manuscript_world_events(&events);
         let fresh = self.manuscript.drain(&mut self.world);
         crate::manuscript::Manuscript::broadcast(clients, fresh);
-        self.driver.dispatch(&self.world, events, clients);
+        self.driver.dispatch(&mut self.world, events, clients);
     }
 }
 
@@ -1040,6 +1101,8 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
     match msg {
         ClientMsg::SetWeather { world_id, .. }
         | ClientMsg::Content { world_id, .. }
+        | ClientMsg::BeginPrefabSetup { world_id, .. }
+        | ClientMsg::AdvancePrefabSetup { world_id, .. }
         | ClientMsg::SetWorldview { world_id, .. }
         | ClientMsg::SetPhysiology { world_id, .. }
         | ClientMsg::SetMiracles { world_id, .. }
@@ -1049,6 +1112,7 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::DeleteRecording { world_id, .. }
         | ClientMsg::SetStrangers { world_id, .. }
         | ClientMsg::SetGameMode { world_id, .. }
+        | ClientMsg::GameModeControl { world_id, .. }
         | ClientMsg::RemoveProp { world_id, .. }
         | ClientMsg::PlaceProp { world_id, .. }
         | ClientMsg::SetPropSupply { world_id, .. }
@@ -1079,6 +1143,7 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::RestartBuiltinModel { .. }
         | ClientMsg::TestModelConnection { .. }
         | ClientMsg::GetAgentConfig { .. }
+        | ClientMsg::WatchResident { .. }
         | ClientMsg::SetPersona { .. }
         | ClientMsg::ResetWorld { .. }
         | ClientMsg::GetPopulation
@@ -1094,7 +1159,9 @@ fn world_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::GetNotebook { .. }
         | ClientMsg::GetNotebookDetail { .. }
         | ClientMsg::GetAgentLimits
-        | ClientMsg::SetAgentLimits { .. } => None,
+        | ClientMsg::SetAgentLimits { .. }
+        | ClientMsg::GetAgentTrace
+        | ClientMsg::SetAgentTrace { .. } => None,
     }
 }
 
@@ -1108,6 +1175,7 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::JoinResident { .. }
         | ClientMsg::SetResidentAppearance { .. }
         | ClientMsg::SetResidentBody { .. } => true,
+        ClientMsg::GameModeControl { .. } => true,
         ClientMsg::SetSpeed { speed, .. } => *speed > 0.0,
         ClientMsg::DirectorSay { .. } => true,
         ClientMsg::Content { command, .. } => !matches!(command, ContentCommand::Detail { .. }),
@@ -1115,6 +1183,8 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::AvatarInput { .. }
         | ClientMsg::GetChatHistory { .. }
         | ClientMsg::GetWorldSettings
+        | ClientMsg::BeginPrefabSetup { .. }
+        | ClientMsg::AdvancePrefabSetup { .. }
         | ClientMsg::SetWorldview { .. }
         | ClientMsg::SetPhysiology { .. }
         | ClientMsg::SetMiracles { .. }
@@ -1138,6 +1208,7 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::RestartBuiltinModel { .. }
         | ClientMsg::TestModelConnection { .. }
         | ClientMsg::GetAgentConfig { .. }
+        | ClientMsg::WatchResident { .. }
         | ClientMsg::SetPersona { .. }
         | ClientMsg::ResetWorld { .. }
         | ClientMsg::GetPopulation
@@ -1156,6 +1227,8 @@ fn requires_ready(msg: &ClientMsg) -> bool {
         | ClientMsg::GetAgentLimits
         | ClientMsg::GetManuscript { .. }
         | ClientMsg::SummarizeManuscript { .. }
-        | ClientMsg::SetAgentLimits { .. } => false,
+        | ClientMsg::SetAgentLimits { .. }
+        | ClientMsg::GetAgentTrace
+        | ClientMsg::SetAgentTrace { .. } => false,
     }
 }

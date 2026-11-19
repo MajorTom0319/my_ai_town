@@ -1,37 +1,46 @@
 import type { Atlas } from 'town-shared/mapDocument'
 
-// 按房间的功能定外观：墙面、墙高、屋顶颜色和坡度、窗、门，再加一两个认得出的特征（招牌、雨棚、旗杆）。
+// 按房间的功能定外观：墙面、墙高、屋顶颜色和坡度、窗、门，再加一两个认得出的特征（招牌、雨棚）。
+// 屋脊不立旗：几道色条的旗子怎么配色都容易看成哪国国旗。
 // 每种功能具体长什么样由风格包给（themes/），这里只有类型、门的尺寸和判断功能的规则。
 // 功能取地图里房间的 kind（建镇生成的地图都有）；默认小镇这类旧地图没有 kind，按编号和名字判断。
 // 平面图的地板、海岸收进的海塔和立体场景的房子都用这里的判断，同一间房只有一种功能。
 // 剧院是拱顶，柱廊图书馆门前一排石柱；海塔不盖房子，整块占地是石台、正中立灯塔。
 // 屋顶形状、屋面、窗型给了多种的，按房间编号挑一种；同一张地图每次打开都一样。
 
-export type WallStyle =
-  | 'plaster'
-  | 'wood'
-  | 'stone'
-  | 'brick'
-  | 'clean'
-  | 'pastel'
-  | 'plank'
+export const WALL_STYLES = [
+  'plaster',
+  'wood',
+  'stone',
+  'brick',
+  'clean',
+  'pastel',
+  'plank',
   // 废土：波纹铁皮、集装箱、打了补丁的水泥、拼起来的废料板
-  | 'tin'
-  | 'container'
-  | 'concrete'
-  | 'scrap'
+  'tin',
+  'container',
+  'concrete',
+  'scrap',
   // 冰雪：刷了漆的竖木板，漆色按房子编号挑
-  | 'painted'
+  'painted',
+] as const
+export type WallStyle = (typeof WALL_STYLES)[number]
 /** 屋顶形状：gable 是沿长边的双坡（原来唯一的一种），hip 四坡（方形占地就成了攒尖），
  *  front 屋脊南北向、山墙朝南对着街；cross 在双坡的南坡上叠一个朝南的小山墙（十字脊），
  *  dormer 是南坡上开的老虎窗。cross 和 dormer 只用在横长的房子上，放不下时退成别的形状 */
-export type RoofShape = 'gable' | 'hip' | 'front' | 'cross' | 'dormer'
+export const ROOF_SHAPES = ['gable', 'hip', 'front', 'cross', 'dormer'] as const
+export type RoofShape = (typeof ROOF_SHAPES)[number]
 
 /** 屋面：瓦、石板瓦、木瓦、生锈的波纹铁皮、厚雪 */
-export type Roofing = 'tile' | 'slate' | 'shingle' | 'tin' | 'snow'
+export const ROOFINGS = ['tile', 'slate', 'shingle', 'tin', 'snow'] as const
+export type Roofing = (typeof ROOFINGS)[number]
+
+/** 地图上写的取值是不是这几种之一 */
+export const oneOf = <T extends string>(list: readonly T[], value: string | undefined) =>
+  list.find((item) => item === value)
 
 /** boarded：一部分窗钉了木板，其余是带铁栏的脏玻璃；frost：白窗框，窗台上积雪，窗角结霜；
- *  casement：不带百叶的双扇窗 */
+ *  casement：不带百叶的双扇窗；tower：高楼一层一排窗，有的炸成黑洞、有的砌死，零星几扇夜里还亮 */
 export type WindowKind =
   | 'shutter'
   | 'casement'
@@ -44,6 +53,7 @@ export type WindowKind =
   | 'rows'
   | 'boarded'
   | 'frost'
+  | 'tower'
 
 const BUILDING_KINDS = [
   'home',
@@ -92,7 +102,6 @@ export interface BuildingStyle {
   sign?: 'cross' | 'book' | 'hammer' | 'inn' | 'emblem' | 'mask'
   flowers?: boolean
   lanterns?: boolean
-  flag?: boolean
   /** 屋顶形状：默认双坡，剧院是半圆的拱顶 */
   vault?: boolean
   /** 不盖房子：整块占地是石台，正中立一座灯塔（hd2d/lighthouse.ts）；墙高只用来定掀开后的室内墙高 */

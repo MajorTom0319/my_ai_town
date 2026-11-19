@@ -2,13 +2,35 @@ import type { Atlas } from 'town-shared/mapDocument'
 import { PIXEL } from '../grid'
 import { footprint, placer, type Dock } from '../pixel/island'
 import { hash, mixHex } from '../pixel/noise'
-import { villageBoat, type BoatView, type Moor } from './boats'
-import { fountain } from './fountain'
+import { boatModel } from './boats'
+import type { FountainLook } from './fountain'
+import type { Kit } from './propKit'
+import { stall } from './stalls'
+import { bench, deckChair, parasol, planter, reeds, rock, signpost, telescope } from './parkPieces'
+import {
+  BIG_TREE_HALOS,
+  bigTree,
+  blossomTree,
+  cascade,
+  cedar,
+  deer,
+  lilyPads,
+  stoneLantern,
+} from './groveArt'
 import { sprite, stone } from './sprite'
 
-// 户外地点的立体标志物：摩天轮、旋转亭、方尖碑、喷泉、神庙遗迹、弧形阶台这些地标，
+// 户外地点的立体标志物：摩天轮、旋转亭、方尖碑、神庙遗迹这些地标（弧形阶台、喷泉是立体搭的，见 stand.ts、fountain.ts），
 // 以及市场的摊位、港口栈桥边的船、花园的花拱门、公园的凉亭。都是竖在地上的像素立牌，
 // 和树、路灯一样按俯角转向镜头；光从左上来，左边亮右边暗。一个贴图像素对应一个地图像素。
+
+/** 立牌照亮脚下一圈地面（火盆、霓虹招牌）：颜色、照多远（地图单位）、亮度倍数，
+ *  on 是天黑到什么程度亮起来（0～1，同路灯） */
+export interface StandeeLight {
+  color: string
+  reach: number
+  power?: number
+  on?: number
+}
 
 /** 逐帧动画的立牌：canvas 是横排 frames 帧的图集，每秒 fps 帧循环播放 */
 export interface Flipbook {
@@ -17,6 +39,18 @@ export interface Flipbook {
   glow?: HTMLCanvasElement
   frames: number
   fps: number
+  light?: StandeeLight
+  /** 花木：随风摆；高过 60 个贴图像素的大树，脚下的灯光越往上越暗（树顶留在月色里） */
+  plant?: boolean
+  /** 灯：自发光的部分天黑才亮（不给时白天也微亮） */
+  lamp?: boolean
+  /** 在这些点上加一团光晕：[横向偏移（贴图像素）, 离地多少贴图像素, 光晕大小（地图单位）] */
+  halos?: [number, number, number][]
+  /** 落花：花瓣从花冠里飘下来（见 petals.ts）。r 是花冠半径，low～high 是花冠离地多高（地图单位），count 片；
+   *  afloat 是身边的水面上再浮多少片 */
+  sheds?: { r: number; low: number; high: number; count: number; afloat?: number }
+  /** 入夜身边聚多少只萤火虫，散在多大半径里（地图单位） */
+  swarm?: { r: number; count: number }
 }
 
 export interface LandmarkSprite {
@@ -28,22 +62,54 @@ export interface LandmarkSprite {
   frames?: number
   fps?: number
   glow?: HTMLCanvasElement
+  light?: StandeeLight
+  /** 以下几项同 Flipbook */
+  plant?: boolean
+  lamp?: boolean
+  halos?: [number, number, number][]
+  sheds?: Flipbook['sheds']
+  swarm?: Flipbook['swarm']
+  /** 蹲到这栋房子（或只看不进的楼）的墙顶上 */
+  on?: string
 }
+
+/** 搭成立体的标志物（摊棚、船）：用道具的积木搭（propKit.ts），原点在落点的地面上，正面朝南。
+ *  angle 是它的东（积木的 x 轴）在地图上转到哪个方向（弧度，地图 x 朝东、y 朝南）；
+ *  float 是浮在水上随波起伏（船），roll 是绕积木的 x 轴歪多少（搁浅的船）。进场景见 landmarkModels.ts */
+export interface LandmarkModel {
+  build: (k: Kit) => void
+  angle?: number
+  float?: boolean
+  roll?: number
+}
+
+/** 一件标志物：立牌、逐帧动画的立牌，或者搭成立体的 */
+export type LandmarkArt = HTMLCanvasElement | Flipbook | LandmarkModel
+
+/** 摆好位置的立体标志物（地图坐标） */
+export interface PlacedModel {
+  x: number
+  y: number
+  model: LandmarkModel
+}
+
+const isModel = (art: LandmarkArt): art is LandmarkModel => 'build' in art
 
 /** 一种风格的户外立牌：各类地点放什么、栈桥边停什么船、桥上堆什么、野地和外圈散落什么 */
 export interface LandmarkSet {
-  /** 一种户外地点在自己的区域里放哪些立牌：[贴图或逐帧动画, 相对区域中心的偏移（地图像素）] */
-  plans: Record<string, (seed: number) => [HTMLCanvasElement | Flipbook, number, number][]>
-  /** 栈桥边的船：kind 0、1 是大船，2 是小舢板；view 是镜头看见侧面还是船尾，moor 是怎么系的。
-   *  没有这种船时给 null */
-  boat: (
-    seed: number,
-    view: BoatView,
-    kind: number,
-    moor: Moor
-  ) => HTMLCanvasElement | Flipbook | null
+  /** 一种户外地点在自己的区域里放哪些立牌：[贴图或逐帧动画, 相对区域中心的偏移（地图像素）, 能不能立在水上]。
+   *  按区域的 kind 挑，区域指定了 landmark 就按它挑。落到水上的一般拉回岸上，第四项为 true 的照立
+   *  （冰钓小屋立在冻住的海上） */
+  plans: Record<string, (seed: number) => [LandmarkArt, number, number, boolean?][]>
+  /** 栈桥边的船（搭成立体的，见 boats.ts）：kind 0、1 是大船，2 是小舢板；没有这种船时给 null */
+  boat: (seed: number, kind: number) => LandmarkModel | null
   /** 栈桥上堆的杂物（木箱、木桶、缆绳、鱼篓） */
   dockGoods: (seed: number) => HTMLCanvasElement
+  /** 公园（没有 decor、没指定地标的 park 区域）正中的凉亭搭成立体的（见 pixel/pavilions.ts），
+   *  这些区域不再立 plans.park 的立牌；地图按坐标立的 park 立牌照旧（旧地图里的） */
+  pavilion?: boolean
+  /** 喷泉区域的喷泉是立体的（见 fountain.ts），这里选样子：流水、冻住，还是干涸 */
+  fountain: FountainLook
   /** 散落物：每个地图像素放一件的概率，野地（land）和外圈（outer）分开算；sprite 给出一件的贴图 */
   scatter?: {
     land: number
@@ -213,57 +279,6 @@ export function temple() {
   })
 }
 
-export function court() {
-  return sprite(92, 32, ({ px, rect }) => {
-    // 半圆形的几级石阶，越往后越高；前面是一块表演用的平台
-    const cx = 46
-    for (let t = 3; t >= 0; t--) {
-      const rx = 22 + t * 8,
-        ry = 8 + t * 6,
-        base = 30 - t * 2
-      for (let y = base - ry; y <= base; y++) {
-        const half = Math.round(rx * Math.sqrt(Math.max(0, 1 - ((base - y) / ry) ** 2)))
-        for (let x = cx - half; x <= cx + half; x++) {
-          const edge = y === base - ry || Math.abs(x - cx) >= half - 1
-          px(x, y, edge ? '#8c8270' : t % 2 ? '#c8bca6' : '#b4a890')
-        }
-      }
-    }
-    for (let y = 26; y <= 31; y++) {
-      const half = Math.round(20 * Math.sqrt(1 - ((y - 28.5) / 3.5) ** 2))
-      rect(cx - half, y, 2 * half + 1, 1, y === 26 ? '#e8dec8' : '#d4c8b0')
-    }
-  })
-}
-
-const AWNINGS: [string, string][] = [
-  ['#d0473c', '#f1ead8'],
-  ['#3f7a9a', '#f1ead8'],
-  ['#d8a840', '#f1ead8'],
-  ['#5a9a5a', '#f1ead8'],
-]
-const GOODS = ['#e05a4a', '#f0c040', '#7ab050', '#e89040', '#b86ab0']
-
-export function stall(k: number) {
-  const [a, b] = AWNINGS[k % AWNINGS.length]
-  return sprite(28, 26, ({ px, rect }) => {
-    rect(1, 7, 2, 19, '#6a4a30')
-    rect(25, 7, 2, 19, '#4e3624')
-    for (let x = 0; x < 28; x++) for (let y = 1; y < 7; y++) px(x, y, (x >> 2) & 1 ? b : a)
-    rect(0, 0, 28, 1, mixHex(a, '#2a2230', 0.3))
-    for (let x = 0; x < 28; x++)
-      if ((x >> 2) % 2 === 0 || x % 4 === 1) px(x, 7, (x >> 2) & 1 ? b : a)
-    rect(0, 17, 28, 7, '#8a6a44')
-    rect(0, 17, 28, 1, '#a88660')
-    rect(0, 23, 28, 1, '#5e4630')
-    for (let i = 0; i < 9; i++) {
-      const c = GOODS[(i + k) % GOODS.length]
-      rect(2 + i * 3, 15, 2, 2, c)
-      px(2 + i * 3, 15, mixHex(c, '#ffffff', 0.4))
-    }
-  })
-}
-
 /** 栈桥上的杂物：摞起来的两只木箱、木桶、一盘缆绳、一只鱼篓，按编号挑一种 */
 export function dockGoods(seed: number) {
   const k = Math.floor(hash(seed, 1, 23) * 4)
@@ -335,95 +350,262 @@ export function roseArch(dead = false) {
   })
 }
 
-/** broken 为 true 时顶棚塌了一块 */
+/** 公园的八角凉亭：瓦顶分成几片斜面（左亮右暗）、一道道瓦缝，奶白的屋脊和檐口花边，檐下吊一盏灯；
+ *  白柱子之间看得见亭子里的暗处和后排的柱子，前面一圈栏杆，正中留口、两级石阶下来，左边柱子爬着开花的藤。
+ *  broken 为 true 时顶棚塌了一块，灯掉了 */
 export function gazebo(broken = false) {
-  return sprite(42, 42, ({ px, rect }) => {
-    for (let y = 2; y <= 14; y++) {
-      const half = Math.round(((y - 1) / 13) * 20)
-      for (let x = 21 - half; x <= 21 + half; x++) {
-        if (broken && y > 5 && Math.hypot(x - 27, y - 10) < 5 + hash(x, y, 6) * 2) continue
-        px(x, y, x > 21 + half * 0.4 ? '#3f6a5e' : x < 21 - half * 0.5 ? '#6a9a86' : '#4f7f6e')
+  return sprite(46, 46, ({ px, rect }) => {
+    const apex = 22.5
+    // 瓦顶：五道屋脊把顶分成四片，越往右越暗；每三行一道瓦缝
+    const ridges = [1, 12, apex, 33, 44]
+    const panels = ['#78ab90', '#5f9179', '#4d7c67', '#3b6555']
+    for (let y = 4; y <= 16; y++) {
+      const t = (y - 4) / 12
+      const half = 1 + t * 21.5
+      for (let x = Math.ceil(apex - half); x <= Math.floor(apex + half); x++) {
+        if (broken && y > 6 && Math.hypot(x - 29, y - 11) < 4.5 + hash(x, y, 6) * 2) continue
+        const at = ridges.map((r) => apex + (r - apex) * t)
+        const ridge = at.some((r) => Math.abs(x - r) < 0.6)
+        const panel = Math.min(3, Math.max(0, at.findIndex((r) => x < r) - 1))
+        let c = panels[panel < 0 ? 3 : panel]
+        if ((y - 4) % 3 === 2) c = mixHex(c, '#1d2a2a', 0.22)
+        px(x, y, ridge ? mixHex('#e2dac6', '#1d2a2a', panel > 1 ? 0.18 : 0) : c)
       }
     }
-    rect(20, 0, 2, 2, '#c8a040')
-    rect(0, 15, 42, 2, '#e8e0d0')
-    for (const x of [3, 14, 26, 37]) {
-      rect(x, 17, 3, 18, '#f0ece2')
-      rect(x + 2, 17, 1, 18, '#c8c2b4')
+    // 宝顶
+    rect(22, 0, 2, 1, '#e8c860')
+    rect(21, 1, 4, 2, '#c8a040')
+    px(21, 1, '#f0d878')
+    rect(22, 3, 2, 1, '#9a7a30')
+    // 檐口：一道奶白的封檐板，底下隔一个像素垂一点花边
+    rect(0, 17, 46, 1, '#f0ebde')
+    rect(0, 18, 46, 1, '#cfc7b6')
+    for (let x = 0; x < 46; x += 2) px(x, 19, '#e6dfcf')
+    // 亭子里：暗处、后排的柱子和栏杆
+    rect(4, 19, 38, 15, '#2f3b36')
+    rect(4, 19, 38, 2, '#222b28')
+    for (const x of [10, 22, 35]) rect(x, 21, 1, 13, '#5a645e')
+    rect(4, 28, 38, 1, '#4a5450')
+    // 檐下吊的灯
+    if (!broken) {
+      rect(23, 20, 1, 2, '#3a3440')
+      rect(22, 22, 3, 3, '#ffd27a')
+      px(22, 22, '#fff0b8')
+      rect(22, 25, 3, 1, '#a8762c')
     }
-    rect(3, 27, 37, 1, '#d8d0c0')
-    for (let x = 4; x < 40; x += 3) rect(x, 28, 1, 5, '#d8d0c0')
-    rect(1, 35, 40, 4, '#b8a888')
-    rect(1, 35, 40, 1, '#d0c0a0')
-    rect(1, 38, 40, 1, '#8a7a60')
+    // 前排四根柱子：柱头宽一点，左亮右暗
+    for (const x of [2, 14, 30, 42]) {
+      rect(x - 1, 19, 4, 1, '#e8e2d4')
+      rect(x, 20, 2, 15, '#f4f0e6')
+      rect(x + 2, 20, 1, 15, '#c8c0b0')
+      px(x, 20, '#ffffff')
+    }
+    // 前面的栏杆：两边两跨有，正中一跨留口
+    for (const [x0, x1] of [
+      [4, 13],
+      [33, 41],
+    ]) {
+      rect(x0, 28, x1 - x0 + 1, 1, '#f0ebde')
+      for (let x = x0 + 1; x < x1; x += 2) rect(x, 29, 1, 4, '#ddd6c6')
+      rect(x0, 33, x1 - x0 + 1, 1, '#cfc7b6')
+    }
+    // 台基：石砌，上沿亮
+    rect(0, 35, 46, 1, '#e2d8c0')
+    rect(0, 36, 46, 4, '#bcae92')
+    rect(38, 36, 8, 4, '#a39478')
+    rect(0, 39, 46, 1, '#857760')
+    for (let x = 3; x < 46; x += 6) px(x, 37, '#a39478')
+    // 正中两级石阶
+    rect(15, 40, 16, 1, '#d6ccb4')
+    rect(15, 41, 16, 2, '#ab9d82')
+    rect(13, 43, 20, 1, '#d6ccb4')
+    rect(13, 44, 20, 2, '#9c8e74')
+    // 左边柱子上爬的藤和花
+    for (let k = 0; k < 34; k++) {
+      const x = 1 + Math.floor(hash(k, 1, 9) * 5)
+      const y = 19 + Math.floor(hash(k, 2, 9) * 17)
+      const leaf = hash(k, 3, 9)
+      if (broken && leaf > 0.7) continue
+      px(
+        x,
+        y,
+        leaf < 0.4 ? '#4d7a45' : leaf < 0.7 ? '#6b9a52' : leaf < 0.85 ? '#e8687a' : '#f4a0b0'
+      )
+    }
   })
 }
 
+/** 夜里亮灯的凉亭：檐下那盏灯是自发光的，照亮亭子里和脚下一圈 */
+export function gazeboLit(): Flipbook {
+  const canvas = gazebo()
+  const glow = sprite(canvas.width, canvas.height, ({ rect, px }) => {
+    rect(22, 22, 3, 3, '#ffd27a')
+    px(22, 22, '#fff0b8')
+  })
+  return { canvas, glow, frames: 1, fps: 1, light: { color: '#ffc477', reach: 180, power: 1.1 } }
+}
+
 export const VILLAGE_LANDMARKS: LandmarkSet = {
-  boat: villageBoat,
+  boat: (seed, kind) => boatModel('village', seed, kind),
   dockGoods,
+  pavilion: true,
+  fountain: 'flowing',
   plans: {
     ferris: () => [[ferrisWheel(), 0, -6]],
     carousel: () => [[carousel(), 0, -4]],
     obelisk: () => [[obelisk(), 0, -6]],
-    fountain: () => [[fountain(), 0, -4]],
     temple: () => [[temple(), 0, -6]],
-    court: () => [[court(), 0, -8]],
     market: (seed) => [
-      [stall(seed), -30, -10],
-      [stall(seed + 1), 0, -14],
-      [stall(seed + 2), 30, -10],
+      [stall(seed, 'village'), -30, -10],
+      [stall(seed + 1, 'village'), 0, -14],
+      [stall(seed + 2, 'village'), 30, -10],
     ],
     garden: () => [[roseArch(), 0, -8]],
-    park: () => [[gazebo(), 0, -6]],
+    park: () => [[gazeboLit(), 0, -6]],
+    // 公园和海边的小摆设（见 parkPieces.ts），地图按坐标立
+    bench: (seed) => [[bench(seed), 0, 0]],
+    parasol: (seed) => [
+      [parasol(seed), 0, 0],
+      [deckChair(seed), 14, 3],
+    ],
+    planter: (seed) => [[planter(seed), 0, 0]],
+    reeds: (seed) => [[reeds(seed), 0, 0]],
+    rock: (seed) => [[rock(seed), 0, 0]],
+    telescope: () => [[telescope(), 0, 0]],
+    signpost: (seed) => [[signpost(seed), 0, 0]],
+    // 花树林（见 groveArt.ts），地图按坐标立：大花树落花、入夜聚萤火虫，灯笼和石灯天黑才亮
+    bigtree: () => [
+      [
+        {
+          ...bigTree(),
+          plant: true,
+          lamp: true,
+          halos: BIG_TREE_HALOS.map(([dx, up]) => [dx, up, 54]),
+          sheds: { r: 290, low: 150, high: 430, count: 300, afloat: 110 },
+          swarm: { r: 520, count: 170 },
+        },
+        0,
+        0,
+      ],
+    ],
+    blossom: (seed) => [
+      [
+        {
+          canvas: blossomTree(seed),
+          frames: 1,
+          fps: 1,
+          plant: true,
+          sheds: { r: 90, low: 60, high: 170, count: 14 },
+        },
+        0,
+        0,
+      ],
+    ],
+    cedar: (seed) => [[{ canvas: cedar(seed), frames: 1, fps: 1, plant: true }, 0, 0]],
+    lantern: (seed) => [[{ ...stoneLantern(seed), lamp: true, halos: [[0, 8, 60]] }, 0, 0]],
+    lily: (seed) => [[lilyPads(seed), 0, 0]],
+    cascade: () => [[cascade(), 0, 0]],
+    deer: (seed) => [[deer(seed), 0, 0]],
   },
 }
 
-/** 栈桥边的船：一条大船靠在桥身后面（横向的桥看侧面、船头朝桥头；竖向的桥看船尾），
- *  多半还有一条小舢板拴在桥前头靠根部的地方、一条船系在桥头外面港湾里的浮筒上。
- *  船底下要整片是水才放（water 按地图坐标问） */
+/** 栈桥边的船（见 boats.ts）：一条大船靠在桥身后面，船身顺着桥、船头朝桥头；多半还有一条小舢板拴在桥前头
+ *  靠根部的地方，船头朝岸；一条船下了锚停在桥头外面的港湾里，船头大致朝岸。船底下要整片是水才放（water 按地图坐标问） */
 function mooredBoats(
   dock: Dock,
   k: number,
   set: LandmarkSet,
   seed: number,
   water: (x: number, y: number) => boolean
-): LandmarkSprite[] {
+): PlacedModel[] {
   const at = placer(dock)
   const { L, W } = footprint(dock)
-  const side = dock.dx !== 0
-  const view: BoatView = side ? 'side' : 'stern'
   // 船占的一片（沿桥 u0..u1、横过桥 v0..v1）隔两像素抽查一遍
   const clear = (u0: number, u1: number, v0: number, v1: number) => {
     for (let u = u0; u <= u1; u += 2)
       for (let v = v0; v <= v1; v += 2) if (!water(...at(u, v))) return false
     return true
   }
-  const tied = (mirror: boolean): Moor => ({ mirror, tied: true })
-  const out: LandmarkSprite[] = []
-  const add = (u: number, v: number, art: HTMLCanvasElement | Flipbook | null) => {
-    if (!art) return
+  const out: PlacedModel[] = []
+  const along = Math.atan2(dock.dy, dock.dx)
+  const add = (u: number, v: number, model: LandmarkModel | null, angle: number) => {
+    if (!model) return
     const [x, y] = at(u, v)
-    out.push({ x, y, ...(art instanceof HTMLCanvasElement ? { canvas: art } : art) })
+    out.push({ x, y, model: { ...model, angle } })
   }
   // 地形种子各张地图一样，按栈桥的位置再取一个：各个小镇的船不一样
   const own = Math.floor(hash(Math.round(dock.x), Math.round(dock.y), seed + k) * 1e6)
   const roll = (salt: number) => hash(own, salt, 17)
   const kind = Math.floor(roll(1) * 2)
-  // 大船：侧面船长约 34、看船尾时宽约 14 像素
+  // 大船长 32、宽 10 像素以内，船边离桥一个半像素
   const u = L - 13,
-    v = side ? -4 : -9
-  if (u > 17 && clear(u - 17, u + 17, v - (side ? 3 : 7), v + (side ? 3 : 7)))
-    add(u, v, set.boat(own, view, kind, tied(dock.dx < 0)))
+    v = -6.5
+  if (u > 17 && clear(u - 17, u + 17, v - 5.5, v + 5.5)) add(u, v, set.boat(own, kind), along)
   const ru = 14,
-    rv = W + (side ? 3 : 5)
-  if (roll(2) < 0.75 && clear(ru - 10, ru + 10, rv - 2, rv + 4))
-    add(ru, rv, set.boat(own + 7, view, 2, tied(dock.dx > 0)))
-  // 港湾里的船：在桥头外面、桥身后方，和靠桥的大船错开
+    rv = W + 3.5
+  if (roll(2) < 0.75 && clear(ru - 8, ru + 8, rv - 3, rv + 3))
+    add(ru, rv, set.boat(own + 7, 2), along + Math.PI)
   const au = L + 14,
-    av = side ? -24 : -26
-  if (roll(3) < 0.8 && clear(au - 18, au + 18, av - 4, av + 4))
-    add(au, av, set.boat(own + 13, view, 1 - kind, { mirror: dock.dx > 0, tied: false }))
+    av = -24
+  if (roll(3) < 0.8 && clear(au - 18, au + 18, av - 6, av + 6))
+    add(au, av, set.boat(own + 13, 1 - kind), along + Math.PI + (roll(4) - 0.5) * 0.7)
+  return out
+}
+
+/** 左右翻过来的立牌：逐帧动画每一帧各自翻，帧的顺序不变 */
+function mirrored(art: HTMLCanvasElement | Flipbook): HTMLCanvasElement | Flipbook {
+  const flip = (c: HTMLCanvasElement, frames: number) => {
+    const out = document.createElement('canvas')
+    out.width = c.width
+    out.height = c.height
+    const ctx = out.getContext('2d')!
+    const fw = c.width / frames
+    for (let f = 0; f < frames; f++) {
+      ctx.save()
+      ctx.translate((f + 1) * fw, 0)
+      ctx.scale(-1, 1)
+      ctx.drawImage(c, f * fw, 0, fw, c.height, 0, 0, fw, c.height)
+      ctx.restore()
+    }
+    return out
+  }
+  if (art instanceof HTMLCanvasElement) return flip(art, 1)
+  return {
+    ...art,
+    canvas: flip(art.canvas, art.frames),
+    glow: art.glow && flip(art.glow, art.frames),
+  }
+}
+
+/** 地图按坐标立的立牌（Atlas 的 standees）：照风格包 plans 里的名字画，不占区域格子，
+ *  落在水上（干海床、冰面）也照立。种子按立牌的位置取，挪动一件不影响别的 */
+export function mapStandees(
+  atlas: Atlas,
+  seed: number,
+  set: LandmarkSet
+): (LandmarkSprite | PlacedModel)[] {
+  const out: (LandmarkSprite | PlacedModel)[] = []
+  for (const s of atlas.standees ?? []) {
+    const plan = s.kind === 'court' ? undefined : set.plans[s.kind]
+    if (!plan) continue
+    const own = Math.floor(hash(Math.round(s.x), Math.round(s.y), seed + 41) * 1e6)
+    for (const [art, dx, dy] of plan(own)) {
+      const x = s.x + (s.flip ? -dx : dx) * PIXEL,
+        y = s.y + dy * PIXEL
+      // 立体的不翻：转过去看就是另一面
+      if (isModel(art)) {
+        out.push({ x, y, model: art })
+        continue
+      }
+      const drawn = s.flip ? mirrored(art) : art
+      out.push({
+        x,
+        y,
+        ...(drawn instanceof HTMLCanvasElement ? { canvas: drawn } : drawn),
+        ...(s.on ? { on: s.on } : {}),
+      })
+    }
+  }
   return out
 }
 
@@ -434,8 +616,10 @@ export function landmarkSprites(
   docks: Dock[],
   set: LandmarkSet,
   water: (x: number, y: number) => boolean
-): LandmarkSprite[] {
-  const out: LandmarkSprite[] = docks.flatMap((d, k) => mooredBoats(d, k, set, seed, water))
+): (LandmarkSprite | PlacedModel)[] {
+  const out: (LandmarkSprite | PlacedModel)[] = docks.flatMap((d, k) =>
+    mooredBoats(d, k, set, seed, water)
+  )
   // 各地点立牌的种子按摆了几件往后数；船的条数不定，按原先每条栈桥一条船起算，地标的样子不跟着变
   let placed = docks.length
   for (const r of atlas.regions) {
@@ -454,21 +638,30 @@ export function landmarkSprites(
       x1: Math.max(...xs) + r.cell_size,
       y1: Math.max(...ys) + r.cell_size,
     }
-    const plan = set.plans[r.kind]
+    // 林子、行道树、草坪这些只管样子的区域不摆这类地点自带的凉亭、花拱门；指定了地标的照它摆。
+    // 看台（court）是立体搭的，见 stand.ts
+    const kind = r.landmark ?? (r.decor ? undefined : r.kind)
+    // 立体凉亭由场景另搭（见 pixel/pavilions.ts）
+    if (kind === 'park' && set.pavilion) continue
+    // 立体喷泉由场景另搭（见 pixel/fountains.ts）
+    if (kind === 'fountain') continue
+    const plan = kind && kind !== 'court' ? set.plans[kind] : undefined
     if (!plan) continue
     const cx = (box.x0 + box.x1) / 2,
       cy = (box.y0 + box.y1) / 2
     const arts = plan(seed + placed)
     placed += arts.length
-    for (const [art, dx, dy] of arts) {
+    for (const [art, dx, dy, afloat] of arts) {
       // 落到水上的（港口的地标偏得远）往中心拉回陆上
       let k = 1
-      while (k > 0 && water(cx + dx * PIXEL * k, cy + dy * PIXEL * k)) k -= 0.1
-      out.push({
-        x: cx + dx * PIXEL * Math.max(0, k),
-        y: cy + dy * PIXEL * Math.max(0, k),
-        ...(art instanceof HTMLCanvasElement ? { canvas: art } : art),
-      })
+      while (!afloat && k > 0 && water(cx + dx * PIXEL * k, cy + dy * PIXEL * k)) k -= 0.1
+      const x = cx + dx * PIXEL * Math.max(0, k),
+        y = cy + dy * PIXEL * Math.max(0, k)
+      out.push(
+        isModel(art)
+          ? { x, y, model: art }
+          : { x, y, ...(art instanceof HTMLCanvasElement ? { canvas: art } : art) }
+      )
     }
   }
   return out

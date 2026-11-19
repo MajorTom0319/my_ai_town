@@ -1,9 +1,14 @@
 // 连接模型的弹层：选一个模型服务、填密钥，测试连通后保存。首页的「设定」和提示卡、小镇里写世界观时
 // 和点「开始」时都用它；首页经管理服务的 /api/towns/models，小镇里经世界连接，由 transport 决定。
 // 手机上从底部升起，电脑上居中。它是模态对话框，从别的对话框里打开也盖在最上面。
-// 要填模型名、地址的服务（火山方舟、Ollama、自定义地址）不在这里，进小镇后在「设定 · 模型服务」里配。
+// 有默认模型的服务可以直接连；要手填模型名、地址的服务进小镇后在「设定 · 模型服务」里配。
 import type { ActiveModelChoice, ProviderConfig, ProviderView } from '../protocol'
-import { PRESETS, usableProvider, type ProviderPreset } from '../providers'
+import {
+  PRESETS,
+  providerRow,
+  usableProvider,
+  type ProviderPreset,
+} from '../providers'
 export { usableProvider } from '../providers'
 import { hourRange, priceOf } from '../pricing'
 import { button, el } from '../dom'
@@ -13,13 +18,13 @@ import './connect.css'
 
 /** 填个密钥就能用的服务（有默认模型），前四个先列出来，其余点「更多」 */
 export const QUICK = [
-  'maas-deepseek',
   'deepseek',
   'kimi',
   'zhipu-glm',
   'minimax',
   'alibaba-bailian',
   'xiaomi-mimo',
+  'volcengine-ark',
 ]
 const FIRST = 4
 /** 申请密钥的地方：只给到平台首页，路径变了也打得开 */
@@ -31,6 +36,7 @@ export const SIGN_UP: Record<string, string> = {
   minimax: 'https://platform.minimaxi.com',
   'alibaba-bailian': 'https://bailian.console.aliyun.com',
   'xiaomi-mimo': 'https://platform.xiaomimimo.com',
+  'volcengine-ark': 'https://console.volcengine.com/ark',
 }
 
 export interface ModelConfig {
@@ -224,6 +230,7 @@ export function connectModel(
         id: preset.id,
         name: existing?.name ?? preset.name,
         base_url: existing?.base_url || preset.baseUrl,
+        ...(existing?.model ? { model: existing.model } : {}),
       }
       const chosenModel = model.value
       state = 'testing'
@@ -231,8 +238,8 @@ export function connectModel(
       try {
         const tested = await t.test(provider, chosenModel, typed)
         if (!tested.ok) throw Error(tested.message || '连接失败')
-        const all = (config?.providers ?? []).map(({ id, name, base_url }) =>
-          id === provider.id ? provider : { id, name, base_url }
+        const all = (config?.providers ?? []).map((p) =>
+          p.id === provider.id ? provider : providerRow(p)
         )
         await t.save({
           active: { provider: provider.id, model: chosenModel },

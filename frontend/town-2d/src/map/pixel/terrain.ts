@@ -4,15 +4,29 @@ import { planDecor, type DecorPlan } from '../decor'
 import { fromPx, MARGIN, OUTDOOR_SPACE, PIXEL, roomRect, toPx } from '../grid'
 import { bayer, crack, fbm, hash, noise, pick } from './noise'
 import { SNOW, SNOW_SHADE, WALL_CAP } from '../palette'
+import { bridgesOf, onBridge, spanOf, type Bridge } from './bridges'
+import { PAVILION_REACH, pavilionsOf, type Pavilion } from './pavilions'
 import { DEFAULT_EDGE_WIDTH } from '../route'
-import { distance, footprint, island, MAX_DEPTH, placer, QUAY, type Dock } from './island'
+import {
+  designOf,
+  distance,
+  footprint,
+  island,
+  MAX_DEPTH,
+  placer,
+  QUAY,
+  type Design,
+  type Dock,
+} from './island'
 import type { GroundPalette, MapTheme } from '../themes/types'
 
 // 地面按地面画布的像素算：地面、区域材质、水、海岸，再画上植被和房间。
 // 画布一个像素 = PIXEL 个地图单位，镜头只按整数倍放大它。
 
-/** 自带铺装的区域，路面不再盖一层土 */
-const PAVED = new Set(['plaza', 'market', 'gate', 'harbor'])
+/** 自带铺装的区域，路面不再盖一层土（沥青是区域的 decor，见 groundKind） */
+const PAVED = new Set(['plaza', 'market', 'gate', 'harbor', 'asphalt', 'fountain'])
+/** 区域的 decor 换掉地面画法的几种：旧沥青路面、碎石废墟地；都不长树 */
+const DECOR_GROUNDS = new Set(['asphalt', 'rubble'])
 
 const packed = new Map<string, number>()
 function u(hex: string) {
@@ -44,7 +58,9 @@ export const TERRAIN_SEED = 20260923
  * wet 标出外圈和水面像素（废土里外圈是干海床，也算在内），open 标出能种树的空地，
  * path 标出土路（2 是路中间的实土），立体场景在上面积水坑；depth 是水面离岸、陆地离水的像素数；
  * shore 标出海边的地物，立体场景按它画浪（见 shoreOf）；calm 是码头一带水面的平静程度（0～255，见 calmOf）；
- * docks 是栈桥（地图坐标），立体场景按它搭桥，船停在旁边
+ * docks 是栈桥（地图坐标），立体场景按它搭桥，船停在旁边；bridges 是路过岛内水面的桥（见 bridges.ts）；
+ * spring 标出温泉的水面，立体场景在上面冒白汽、夜里发光；pavilions 是立体凉亭（见 pavilions.ts），
+ * 和房子重叠的已经去掉
  */
 export interface Ground {
   atlas: Atlas
@@ -57,34 +73,55 @@ export interface Ground {
   wet: Uint8Array
   open: Uint8Array
   path: Uint8Array
+  /** 可选的地面积雪保留比例（0～255），与 base 同尺寸；没有自定义区域时不分配。 */
+  snowCover?: Uint8Array
   depth: Uint8Array
   shore: Uint8Array
   calm: Uint8Array
   docks: Dock[]
+  bridges: Bridge[]
+  spring: Uint8Array
+  pavilions: Pavilion[]
 }
 
+/** 这个风格的草坪公园是修剪过的：画修剪条纹、中间不种树、几乎不长草丛（风格包给了条纹色） */
+export const mownLawn = (theme: MapTheme) => theme.ground.lawnStripe !== undefined
+
 export function groundOf(atlas: Atlas, theme: MapTheme, seed = TERRAIN_SEED): Ground {
-  const decor = planDecor(atlas)
+  const decor = planDecor(atlas, mownLawn(theme))
   const pw = Math.ceil((atlas.canvas.width + 2 * MARGIN) / PIXEL)
   const ph = Math.ceil((atlas.canvas.height + 2 * MARGIN) / PIXEL)
   const { region, wet } = rasterRegions(atlas, decor, pw, ph, seed)
+  // 与地面着色共用区域栅格，避免清扫边界和石路边界错位；旧地图完全沿用原积雪行为。
+  const snowCover = atlas.regions.some((r) => r.snow_cover !== undefined)
+    ? Uint8Array.from(region, (r) => {
+        const value = r < 0 ? undefined : atlas.regions[r].snow_cover
+        return value === undefined || !Number.isFinite(value)
+          ? 255
+          : Math.round(Math.max(0, Math.min(1, value)) * 255)
+      })
+    : undefined
   const kindAt = (i: number) => (region[i] < 0 ? '' : atlas.regions[region[i]].kind)
+  const decorAt = (i: number) => (region[i] < 0 ? undefined : atlas.regions[region[i]].decor)
   const path = tracePaths(atlas, pw, ph, seed)
   const { content, built } = landMasks(atlas, region, wet, path, kindAt, pw, ph)
   const deck = new Uint8Array(pw * ph)
   for (let i = 0; i < pw * ph; i++) deck[i] = kindAt(i) === 'harbor' && !wet[i] ? 1 : 0
-  const coast = coastOf(atlas, decor.harbors, content, deck, wet, pw, ph, seed)
+  const design = designOf(atlas.island, pw, ph)
+  const coast = coastOf(atlas, decor.harbors, content, deck, wet, design, pw, ph, seed)
   const layers: Layers = {
     pw,
     ph,
     seed,
     theme,
     kindAt,
+    decorAt,
     wet,
     path,
     built,
     deck,
     ...coast,
+    ...springRim(coast.spring, wet, pw, ph),
     shoreWidth: shoreWidths(coast, wet, built, pw, ph, seed),
   }
   // 湾里的水浅：海面离岸的像素数按周围海的多少缩放，湾里的浅水带更宽，外海更快变深
@@ -95,6 +132,25 @@ export function groundOf(atlas: Atlas, theme: MapTheme, seed = TERRAIN_SEED): Gr
       if (sea[i] && depth[i] < 30)
         depth[i] = Math.min(40, Math.round(depth[i] * (0.35 + seaAround(x, y) * 0.9)))
     }
+  // 温泉四周不种树、不长草丛：池边留一片干净的雪地
+  if (layers.clear.some(Boolean))
+    decor.vegetation = decor.vegetation.filter((v) => !layers.clear[toPx(v.y) * pw + toPx(v.x)])
+  // 立体凉亭：和房子、楼重叠的不搭；亭子占的地方不种树、不长草丛
+  const roofs = footprints(atlas)
+  const pavilions = pavilionsOf(atlas, theme.landmarks.pavilion === true).filter(
+    (p) =>
+      !roofs.some(
+        (b) =>
+          p.x + PAVILION_REACH > b.x &&
+          p.x - PAVILION_REACH < b.x1 &&
+          p.y + PAVILION_REACH > b.y &&
+          p.y - PAVILION_REACH < b.y1
+      )
+  )
+  if (pavilions.length)
+    decor.vegetation = decor.vegetation.filter(
+      (v) => !pavilions.some((p) => Math.hypot(v.x - p.x, v.y - p.y) < PAVILION_REACH + 2 * PIXEL)
+    )
   const calm = calmOf(layers, theme.outer === 'sea')
   const base = new Uint32Array(pw * ph)
   paintBase(layers, base)
@@ -110,6 +166,7 @@ export function groundOf(atlas: Atlas, theme: MapTheme, seed = TERRAIN_SEED): Gr
   }))
   const open = openGround(atlas, layers)
   const shore = shoreOf(layers)
+  const bridges = bridgesOf(atlas, coast.inland, pw, ph)
   return {
     atlas,
     theme,
@@ -122,9 +179,13 @@ export function groundOf(atlas: Atlas, theme: MapTheme, seed = TERRAIN_SEED): Gr
     open,
     path,
     depth,
+    snowCover,
     shore,
     calm,
     docks,
+    bridges,
+    spring: coast.spring,
+    pavilions,
   }
 }
 
@@ -172,9 +233,54 @@ export function paintGround(ground: Ground, flat: boolean): HTMLCanvasElement {
     }
   }
   for (const s of atlas.spaces) if (s.id !== OUTDOOR_SPACE) room(s, theme, seed, put, darken)
-  if (flat) for (const d of ground.docks) flatPier(d, G, put)
+  for (const r of atlas.ruins ?? []) ruinTop(r, put, darken)
+  if (flat) {
+    for (const d of ground.docks) flatPier(d, G, put)
+    for (const b of ground.bridges) flatBridge(b, G, pw, ph, put)
+  }
   ctx.putImageData(img, 0, 0)
   return canvas
+}
+
+/** 平面图上的桥：石拱桥铺石板、两边一道石栏，木板桥横铺木板、两边压一道深色；南边水上压一行影子 */
+function flatBridge(
+  b: Bridge,
+  G: GroundPalette,
+  pw: number,
+  ph: number,
+  put: (x: number, y: number, c: number) => void
+) {
+  const L = spanOf(b),
+    half = b.width / 2
+  const x0 = toPx(Math.min(b.a[0], b.b[0]) - half) - 1,
+    x1 = toPx(Math.max(b.a[0], b.b[0]) + half) + 1
+  const y0 = toPx(Math.min(b.a[1], b.b[1]) - half) - 1,
+    y1 = toPx(Math.max(b.a[1], b.b[1]) + half) + 1
+  for (let y = Math.max(0, y0); y <= Math.min(ph - 1, y1); y++)
+    for (let x = Math.max(0, x0); x <= Math.min(pw - 1, x1); x++) {
+      const on = onBridge([b], fromPx(x) + PIXEL / 2, fromPx(y) + PIXEL / 2)
+      if (!on) continue
+      const edge = half - Math.abs(on.v) < PIXEL * 1.2
+      const col = Math.floor(on.s / PIXEL)
+      if (b.style === 'stone') {
+        const slab = G.plaza[Math.floor(hash(col >> 2, Math.floor(on.v / 12), 3) * G.plaza.length)]
+        const c = u(edge ? G.gateLine : slab)
+        put(x, y, edge ? mix(c, SHADOW, 0.2) : c)
+      } else {
+        const board = u(G.plank[Math.floor(hash(Math.floor(col / 2), 1, 5) * G.plank.length)])
+        put(
+          x,
+          y,
+          edge ? mix(board, SHADOW, 0.45) : col % 2 ? mix(u(G.plankLine), board, 0.5) : board
+        )
+      }
+      if (
+        on.s > L * 0.02 &&
+        on.s < L * 0.98 &&
+        !onBridge([b], fromPx(x) + PIXEL / 2, fromPx(y + 1) + PIXEL / 2)
+      )
+        put(x, y + 1, mix(u(G.outer[1]), SHADOW, 0.45))
+    }
 }
 
 /** 平面图上的栈桥：桥面板横铺，南边（朝镜头）压两行深色的桥侧和一排桩，看着是架在水上的 */
@@ -205,10 +311,19 @@ interface Layers {
   seed: number
   theme: MapTheme
   kindAt: (i: number) => string
+  /** 所在区域的装饰（林子、行道树、草坪，见 Atlas 的 regions.decor） */
+  decorAt: (i: number) => string | undefined
   wet: Uint8Array
   path: Uint8Array
   built: Uint8Array
   sea: Uint8Array
+  /** 画好的海岸里的岛内水面（河、湖、港湾）：和池塘一样不起浪 */
+  inland: Uint8Array
+  /** 其中的温泉，和温泉池边一圈压雪的黑石头（离水 1～RIM 像素），池子四周不种树的一圈（见 springRim） */
+  spring: Uint8Array
+  mirror: Uint8Array
+  rim: Uint8Array
+  clear: Uint8Array
   piers: Uint8Array
   /** 港口的木码头、码头朝南那一面的木墙（见 island.ts 的 Island.quay） */
   deck: Uint8Array
@@ -275,13 +390,10 @@ function landMasks(
     content[i] = !wet[i] && (region[i] >= 0 || path[i] > 0) ? 1 : 0
     built[i] = content[i] && (path[i] > 0 || kindAt(i) !== 'road') ? 1 : 0
   }
-  for (const s of atlas.spaces) {
-    if (s.id === OUTDOOR_SPACE) continue
-    const r = roomRect(s)
+  for (const r of footprints(atlas))
     for (let y = toPx(r.y); y < toPx(r.y1); y++)
       for (let x = toPx(r.x); x < toPx(r.x1); x++)
         if (x >= 0 && y >= 0 && x < pw && y < ph) content[y * pw + x] = built[y * pw + x] = 1
-  }
   return { content, built }
 }
 
@@ -292,18 +404,22 @@ function coastOf(
   content: Uint8Array,
   deck: Uint8Array,
   wet: Uint8Array,
+  design: Design | undefined,
   pw: number,
   ph: number,
   seed: number
 ) {
   const {
     sea,
+    inland,
+    spring,
+    mirror,
     piers,
     quay,
     rocks,
     docks,
     toSea: depth,
-  } = island(atlas, { content, water: wet, deck, facing }, pw, ph, seed)
+  } = island(atlas, { content, water: wet, deck, facing, design }, pw, ph, seed)
   for (let i = 0; i < pw * ph; i++) if (sea[i]) wet[i] = 1
   const R = 10
   const seaSum = new Int32Array((pw + 1) * (ph + 1))
@@ -325,7 +441,66 @@ function coastOf(
       ((x1 - x0) * (y1 - y0))
     )
   }
-  return { sea, piers, quay, rocks, docks, depth, seaAround }
+  return { sea, inland, spring, mirror, piers, quay, rocks, docks, depth, seaAround }
+}
+
+/** 温泉池沿有几圈像素宽（两层石头） */
+const RIM = 6
+
+/** 温泉四周不种树：池边 CLEAR 像素内，池子南边（镜头这一侧）再多留 CLEAR_SOUTH 像素，
+ *  不然树立起来挡住池子 */
+const CLEAR = 9
+const CLEAR_SOUTH = 26
+
+/** 温泉池边的陆地：离温泉水 1～RIM 像素的记下离水几像素，铺黑石头（见 springStone）；
+ *  clear 标出池子四周不种树的一圈（见 CLEAR） */
+function springRim(spring: Uint8Array, wet: Uint8Array, pw: number, ph: number) {
+  const rim = new Uint8Array(pw * ph),
+    clear = new Uint8Array(pw * ph)
+  if (!spring.some(Boolean)) return { rim, clear }
+  const to = distance(spring, pw, ph)
+  for (let i = 0; i < pw * ph; i++) {
+    if (!wet[i] && to[i] <= RIM + 0.4) rim[i] = Math.max(1, Math.round(to[i]))
+    if (to[i] <= CLEAR) clear[i] = 1
+  }
+  // 往南：每一列从上往下数离上一个温泉像素多远，再左右放宽几格
+  const south = new Uint8Array(pw * ph)
+  for (let x = 0; x < pw; x++) {
+    let last = -1e9
+    for (let y = 0; y < ph; y++) {
+      const i = y * pw + x
+      if (spring[i]) last = y
+      if (y - last <= CLEAR_SOUTH) south[i] = 1
+    }
+  }
+  for (let y = 0; y < ph; y++)
+    for (let x = 4; x < pw - 4; x++)
+      for (let dx = -4; dx <= 4; dx++)
+        if (south[y * pw + x + dx]) {
+          clear[y * pw + x] = 1
+          break
+        }
+  return { rim, clear }
+}
+
+/** 温泉池沿：一圈压雪的黑石头。石头 4×3 像素一块，一行行错开半块：顶上一行压着雪，
+ *  中间一行左亮右暗，底下一行压暗；块之间露出雪。贴水的一圈被热气熏着不积雪、缝是黑的，
+ *  最外一圈石头稀稀落落，空处是雪 */
+function springStone(L: Layers, i: number, x: number, y: number) {
+  const r = L.rim[i]
+  const row = Math.floor(y / 3)
+  const sx = x + (row % 2) * 2
+  const col = Math.floor(sx / 4),
+    lx = sx % 4,
+    ly = y % 3
+  const id = hash(col, row, L.seed + 71)
+  if (r >= RIM - 1 && id < 0.5) return u(r >= RIM ? SNOW : SNOW_SHADE)
+  if (lx === 3) return u(r <= 2 ? '#1d2127' : ly === 0 ? SNOW : SNOW_SHADE)
+  const dark = id < 0.4
+  if (ly === 0)
+    return r > 2 && hash(col, row, L.seed + 72) < 0.6 ? u(SNOW) : u(dark ? '#4c535d' : '#5d6570')
+  if (ly === 1) return u(lx === 0 ? (dark ? '#464c56' : '#5b636f') : dark ? '#353a42' : '#454c56')
+  return u(dark ? '#23272d' : '#2e3339')
 }
 
 /** 沙滩宽窄看地形：数一数周围 21×21 里有多少海，海少说明是凹进去的湾，浪小、沙子堆得宽；
@@ -442,12 +617,16 @@ function paintBase(L: Layers, px: Uint32Array) {
         px[i] = stone(L, i, x, y)
         continue
       }
+      if (L.rim[i]) {
+        px[i] = springStone(L, i, x, y)
+        continue
+      }
       const shore = shoreKind(L, i)
       if (shore && shore < 4) {
         px[i] = shoreColor(L, i, x, y, shore)
         continue
       }
-      const kind = L.kindAt(i)
+      const kind = groundKind(L, i)
       const trodden = !PAVED.has(kind) && (path[i] === 2 || (path[i] === 1 && bayer(x, y) < 0.5))
       px[i] = groundColor(trodden ? 'path' : kind, x, y, seed, G, (c) => {
         if (y > 0) px[i - pw] = c
@@ -460,6 +639,14 @@ function paintBase(L: Layers, px: Uint32Array) {
         else if (hash(x, y, seed + 16) < 0.05) px[i] = u(G.shoreWeed)
       }
     }
+}
+
+/** 一个像素按什么画地面：区域的 decor 是沥青、碎石的照它画，修剪过的草坪（风格包给了条纹色）画成草坪，
+ *  不然按区域的种类 */
+function groundKind(L: Layers, i: number) {
+  const decor = L.decorAt(i)
+  if (decor === 'lawn' && mownLawn(L.theme)) return 'lawn'
+  return decor && DECOR_GROUNDS.has(decor) ? decor : L.kindAt(i)
 }
 
 /** 码头朝南临水那一面（row 是 Island.quay 的 1～3）：两行横着的墙板，越往下越暗；
@@ -517,7 +704,7 @@ function paintShoreline(L: Layers, px: Uint32Array) {
       const n = wet[i - 1] + wet[i + 1] + wet[i - pw] + wet[i + pw]
       if (wet[i]) {
         if (n < 4) px[i] = u(G.outerEdge)
-      } else if (n > 0 && !deck[i] && !quay[i] && !rocks[i] && !beach(L, i))
+      } else if (n > 0 && !deck[i] && !quay[i] && !rocks[i] && !L.rim[i] && !beach(L, i))
         px[i] = mix(px[i], SHADOW, 0.35)
     }
 }
@@ -546,15 +733,16 @@ function calmOf(L: Layers, deepen: boolean) {
   return calm
 }
 
-/** 海边的地物：1 是和外海连着的水（港口的水也算，池塘不算），2 是外海边的沙滩，3 是外海边的岩石岸和礁石。
- *  立体场景只在外海上起浪，浪冲上沙滩、拍在岩石上 */
+/** 海边的地物：1 是和外海连着的水（港口的水也算，池塘和岛内的河湖不算），2 是外海边的沙滩，
+ *  3 是外海边的岩石岸和礁石，4 是温泉的水。立体场景只在外海上起浪，浪冲上沙滩、拍在岩石上；
+ *  温泉另画（见 sea.ts） */
 function shoreOf(L: Layers) {
-  const { pw, ph, wet, rocks } = L
+  const { pw, ph, wet, rocks, inland, spring, mirror } = L
   const out = new Uint8Array(pw * ph)
-  // 从地图四边的水往里灌，灌得到的就是外海
+  // 从地图四边的水往里灌，灌得到的就是外海；岛内的水和外海连着也不灌进去
   const stack: number[] = []
   const push = (i: number) => {
-    if (!wet[i] || out[i]) return
+    if (!wet[i] || inland[i] || out[i]) return
     out[i] = 1
     stack.push(i)
   }
@@ -569,7 +757,11 @@ function shoreOf(L: Layers) {
     if (i < pw * (ph - 1)) push(i + pw)
   }
   for (let i = 0; i < pw * ph; i++) {
-    if (wet[i]) continue
+    if (wet[i]) {
+      if (spring[i]) out[i] = 4
+      else if (mirror[i]) out[i] = 5
+      continue
+    }
     const kind = shoreKind(L, i)
     if (rocks[i] || kind === 1) out[i] = 3
     else if (kind === 2 || kind === 3) out[i] = 2
@@ -583,12 +775,30 @@ function openGround(atlas: Atlas, L: Layers) {
   const open = new Uint8Array(pw * ph)
   for (let i = 0; i < pw * ph; i++) {
     const kind = L.kindAt(i)
-    if (wet[i] || path[i] || quay[i] || rocks[i] || beach(L, i) || PAVED.has(kind)) continue
-    open[i] = OPEN_KINDS[kind] ?? OPEN.town
+    if (wet[i] || path[i] || quay[i] || rocks[i] || L.clear[i] || beach(L, i) || PAVED.has(kind))
+      continue
+    const decor = L.decorAt(i)
+    open[i] =
+      (decor === 'clearing' || (decor && DECOR_GROUNDS.has(decor))
+        ? OPEN.none
+        : decor === 'meadow'
+          ? OPEN.verge
+          : decor === 'lawn'
+            ? OPEN.lawn
+            : OPEN_KINDS[kind]) ?? OPEN.town
   }
-  for (const s of atlas.spaces) {
-    if (s.id === OUTDOOR_SPACE) continue
-    const r = roomRect(s)
+  // 公园、林子里的路：南边一条只长草，不让树冠把路挡住（草坪本来就不撒树）
+  const from = Math.round(VERGE.from / PIXEL),
+    to = Math.round(VERGE.to / PIXEL)
+  for (let y = 0; y < ph; y++)
+    for (let x = 0; x < pw; x++) {
+      if (path[y * pw + x] !== 2) continue
+      for (let dy = from; dy <= to && y + dy < ph; dy++) {
+        const j = (y + dy) * pw + x
+        if (open[j] === OPEN.park) open[j] = OPEN.verge
+      }
+    }
+  for (const r of footprints(atlas)) {
     const x0 = toPx(r.x) - 6,
       y0 = toPx(r.y) - 6
     const x1 = toPx(r.x1) + 6,
@@ -599,8 +809,19 @@ function openGround(atlas: Atlas, L: Layers) {
   return open
 }
 
-/** 空地分类：none 不能种东西（水、路、铺装、房屋四周），其余按所在区域 */
-export const OPEN = { none: 0, wild: 1, park: 2, garden: 3, town: 4 } as const
+/** 房子和只看不进的楼（Atlas 的 ruins）的占地，地图坐标 */
+function footprints(atlas: Atlas) {
+  return [
+    ...atlas.spaces.filter((s) => s.id !== OUTDOOR_SPACE).map((s) => roomRect(s)),
+    ...(atlas.ruins ?? []).map((r) => ({ x: r.x, y: r.y, x1: r.x + r.w, y1: r.y + r.h })),
+  ]
+}
+
+/** 空地分类：none 不能种东西（水、路、铺装、房屋四周），其余按所在区域；lawn 是草坪公园，树和草都稀；
+ *  verge 是公园、林子里路南边的一条：镜头在南边，这里的树冠会把路挡住，只长草不种树 */
+export const OPEN = { none: 0, wild: 1, park: 2, garden: 3, town: 4, lawn: 5, verge: 6 } as const
+/** 路南边多远（地图单位）以内算 verge：树干比这近的树冠压在路北边，比这远的够不着路 */
+export const VERGE = { from: 40, to: 170 } as const
 const OPEN_KINDS: Record<string, number> = { '': OPEN.wild, park: OPEN.park, garden: OPEN.garden }
 
 /** 沿路段折线画出土路：中间 2 是实土，两边 1 是和草地交错的边 */
@@ -712,6 +933,22 @@ function gardenColor({ x, y, seed, G, g }: Spot) {
   return u(pick(G.grass, g * 1.1 - 0.02, x, y, 1.2))
 }
 
+/** 旧沥青路面：深灰底，成片龟裂成黑缝，风刮来的沙在上面积成一摊摊 */
+function asphaltColor({ x, y, seed, cracked }: Spot) {
+  if (cracked(7)) return u('#2a2826')
+  const n = noise(x / 5, y / 5, seed + 4)
+  if (noise(x / 16, y / 16, seed + 9) > 0.66) return u(n > 0.5 ? '#9a8668' : '#8a785c')
+  return u(n > 0.66 ? '#57534e' : n > 0.33 ? '#4c4844' : '#43403c')
+}
+
+/** 碎石废墟地：野地上撒满碎水泥块，大块的亮、碎屑发暗 */
+function rubbleColor(s: Spot, paintAbove: (c: number) => void) {
+  const { x, y, seed } = s
+  if (hash(x, y, seed + 41) < 0.1) return u('#8a8478')
+  if (hash(x >> 1, y >> 1, seed + 43) < 0.06) return u('#6e6a62')
+  return grassColor(s, false, paintAbove)
+}
+
 /** 野地和公园的草：零星的草丛尖和小花，废土里成片龟裂 */
 function grassColor(s: Spot, park: boolean, paintAbove: (c: number) => void) {
   const { x, y, seed, G, g } = s
@@ -724,6 +961,12 @@ function grassColor(s: Spot, park: boolean, paintAbove: (c: number) => void) {
   if (h < 0.0135) return u(G.flowers[Math.floor(hash(x, y, seed + 11) * 5)])
   if (s.cracked(10)) return u(G.cracks!)
   return u(pick(pal, g * 1.15 - 0.05, x, y, 1.2))
+}
+
+/** 修剪过的草坪：比野地的草匀、亮一点，斜着一道深一道浅的修剪条纹，没有草丛尖和野花 */
+function lawnColor({ x, y, G, g }: Spot) {
+  const c = u(pick(G.park, g * 0.6 + 0.3, x, y, 1.2))
+  return Math.floor((x + 2 * y) / 22) % 2 ? mix(c, u(G.lawnStripe!), 0.3) : c
 }
 
 function groundColor(
@@ -759,8 +1002,9 @@ function groundColor(
         : c
     }
     case 'plaza':
+    case 'fountain':
     case 'gate':
-      return slabColor(spot, kind === 'plaza')
+      return slabColor(spot, kind !== 'gate')
     case 'market': {
       const [a, b, dot, stain] = G.market
       let c = u(((x >> 2) + (y >> 2)) & 1 ? a : b)
@@ -771,6 +1015,12 @@ function groundColor(
       return harborColor(spot)
     case 'garden':
       return gardenColor(spot)
+    case 'asphalt':
+      return asphaltColor(spot)
+    case 'rubble':
+      return rubbleColor(spot, paintAbove)
+    case 'lawn':
+      return lawnColor(spot)
     default:
       return grassColor(spot, kind === 'park', paintAbove)
   }
@@ -929,6 +1179,22 @@ function floorColor(type: string, lx: number, ly: number, seed: number): string 
       if (lx % 5 === 0 || ly % 5 === 0) return '#a8735a'
       return (((lx / 5) | 0) + ((ly / 5) | 0)) & 1 ? '#c98f6a' : '#bf8561'
   }
+}
+
+/** 只看不进的楼（Atlas 的 ruins）在平面图上：一块灰水泥楼顶，四边一圈深色女儿墙，东边、南边压一道影子 */
+function ruinTop(r: NonNullable<Atlas['ruins']>[number], put: Put, darken: Darken) {
+  const x = toPx(r.x),
+    y = toPx(r.y)
+  const w = toPx(r.x + r.w) - x,
+    h = toPx(r.y + r.h) - y
+  for (let yy = y + 3; yy < y + h + 6; yy++)
+    for (let xx = x + 3; xx < x + w + 6; xx++)
+      if ((xx >= x + w || yy >= y + h) && bayer(xx, yy) < 0.85) darken(xx, yy, 0.45)
+  for (let yy = y; yy < y + h; yy++)
+    for (let xx = x; xx < x + w; xx++) {
+      const edge = xx === x || yy === y || xx === x + w - 1 || yy === y + h - 1
+      put(xx, yy, u(edge ? '#5e5a54' : hash(xx >> 2, yy >> 2, 7) < 0.15 ? '#77736b' : '#8a867e'))
+    }
 }
 
 /** 房间：投影、地板、墙（顶边露出立面）、朝最近墙边开门 */

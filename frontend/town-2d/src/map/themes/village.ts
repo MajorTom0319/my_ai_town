@@ -35,7 +35,6 @@ const buildings: Record<BuildingKind, BuildingStyle> = {
     windows: 'tall',
     door: 'grand',
     sign: 'emblem',
-    flag: true,
   },
   library: {
     walls: ['stone'],
@@ -160,7 +159,6 @@ const buildings: Record<BuildingKind, BuildingStyle> = {
     door: 'grand',
     awning: { colors: ['#2f5a50', '#efe6d2'], whole: false },
     flowers: true,
-    flag: true,
   },
   colonnade: {
     walls: ['stone'],
@@ -214,6 +212,7 @@ export const village: MapTheme = {
     tuft: '#a7bb78',
     shoreWeed: '#9aa66a',
     flowers: ['#d98a94', '#e8c35e', '#efe9dc', '#b890c8', '#e39a5a'],
+    lawnStripe: '#a6c46a',
   },
   outer: 'sea',
   flora: {
@@ -272,6 +271,5 @@ export const village: MapTheme = {
   },
   motes: { dust: [1, 0.95, 0.85], strength: 0.3, night: 0, drift: 4, lift: 10, fireflies: true },
   lamp: 'street',
-  flag: { colors: ['#b8463a', '#e8c35e'], torn: false },
   lighthouse: 'striped',
 }

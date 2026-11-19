@@ -3,10 +3,7 @@ use crate::{
     avatar::{command, state},
     support::*,
 };
-use host::{
-    persistence::{SaveStore, Scene},
-    world_settings::WorldSettings,
-};
+use host::{persistence::SaveStore, world_settings::WorldSettings};
 use serde_json::{json, Value};
 use std::{fs, net::TcpStream, time::Instant};
 use tungstenite::WebSocket;
@@ -20,6 +17,7 @@ fn killed_host_restores_memory_time_activity_then_reset_replaces_save() {
     let mut town = Town::new();
     town.args = map_args(MAP_2D);
     town.mock_delay = Some("60".into());
+    town.autosave = true;
     let mut ws = town.start();
     until(&mut ws, |m| m["type"] == "roster");
     let id = join_id(&mut ws, "tpl_a");
@@ -214,34 +212,14 @@ fn bad_or_incompatible_save_is_preserved_and_exclusive_lock_is_released() {
     w.note_thought("r1", "这件事要记得。", "测试");
     let settings = WorldSettings::default();
     store
-        .checkpoint_bundle(
-            Scene {
-                world: &w,
-                speed: 0.0,
-                world_settings: &settings,
-                population: None,
-                director: None,
-            },
-            || None,
-            true,
-        )
+        .checkpoint_bundle(&w, 0.0, &settings, None, None, true, None)
         .unwrap();
     let original = fs::read(&path).unwrap();
     let blocked_temp = town.dir.join("world.tmp.tmp");
     fs::create_dir(&blocked_temp).unwrap();
     w.note_thought("r1", "这次写入会失败。", "测试");
     assert!(store
-        .checkpoint_bundle(
-            Scene {
-                world: &w,
-                speed: 0.0,
-                world_settings: &settings,
-                population: None,
-                director: None,
-            },
-            || None,
-            true,
-        )
+        .checkpoint_bundle(&w, 0.0, &settings, None, None, true, None)
         .is_err());
     assert_eq!(fs::read(&path).unwrap(), original);
     fs::remove_dir(&blocked_temp).unwrap();

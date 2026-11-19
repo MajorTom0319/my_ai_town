@@ -22,6 +22,8 @@ logs/
 /.local-apply-director.sh
 /AI小镇启动.exe
 *.log
+# 存模型配置时锁的文件（crates/host/src/models.rs）；直接拿仓库的配置跑世界时会出现在这里
+config/providers.json.lock
 
 # --- 密钥 ---
 .env

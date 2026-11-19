@@ -29,6 +29,7 @@ mod notebook;
 mod observation;
 mod physiology;
 mod population;
+mod prefab;
 mod props;
 mod recording;
 mod resident;
@@ -88,6 +89,7 @@ pub use population::{
     PopulationView, ResidentRegistration, ResidentTemplate, TemplateCard, TemplateFields,
     TemplateStatus, VillagerLook, PATTERN_SIZE,
 };
+pub use prefab::{PrefabSetupPlan, PrefabSetupSelection, PrefabSetupState, PrefabSetupStep};
 pub use props::{
     Choice, DurationRange, InventorySlot, InventoryView, ItemLocation, LegacyVerbView, PlaceNear,
     PlaceRef, PropActionEntry, PropActionView, PropCapabilities, PropPreview, PropView,
@@ -96,15 +98,16 @@ pub use props::{
 pub use recording::ReelView;
 pub use resident::{
     ActionResultView, AgentLimitRanges, AgentLimits, AgentState, AgentUsage, AgentWaitView,
-    EvidenceSource, GoalStatus, HoldCause, LimitRange, MemoryKind, MemoryStatus, PauseKind,
-    RequestKind, RequestStatus, RequestView, ResidentAgentView, ResidentGoalView,
-    ResidentInteractionView, ResidentMemoryView, ResidentUsage, UsageSummary, WorldHold,
+    EvidenceSource, GoalMark, GoalStatus, HoldCause, LimitRange, MemoryKind, MemoryStatus,
+    PauseKind, RequestKind, RequestStatus, RequestView, ResidentAgentView, ResidentDetailView,
+    ResidentGoalView, ResidentInteractionView, ResidentMemoryView, ResidentUsage, UsageSummary,
+    WorldHold,
 };
 pub use roster::{
     ActivityKind, MemberKind, MovementPhase, MovementView, PlanView, RosterLocale, RosterMember,
     VerbKind,
 };
-pub use server_msg::{ServerMsg, WorldSettingsView};
+pub use server_msg::{AgentTraceView, ServerMsg, WorldSettingsView};
 pub use spatial::{PlaceGrid, Point3, PropPosition, Route, SpatialOverride, SpatialOverridesView};
 
 /// 把值当作 `serde_json::Value` 输出：对象的键按字母序排列。

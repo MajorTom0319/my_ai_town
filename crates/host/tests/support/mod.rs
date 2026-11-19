@@ -12,7 +12,7 @@ use std::{
 };
 use tungstenite::{Message, WebSocket};
 
-const WAIT: Duration = Duration::from_secs(8);
+pub const WAIT: Duration = Duration::from_secs(8);
 /// 等世界跑出一段新剧情这类慢结果时的上限；单条消息仍按 WAIT 等。
 pub const LONG_WAIT: Duration = Duration::from_secs(20);
 
@@ -38,6 +38,9 @@ pub struct Town {
     pub persistent: bool,
     /// 起进程的额外参数。
     pub args: Vec<String>,
+    /// 周期存盘每拍都到点。缺省和正式运行一样 30 秒一次：命令和退出当场存，用例一般等不到周期
+    /// 那一次；要看世界自己往前走的进度有没有存下来的用例打开它。
+    pub autosave: bool,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
 }
@@ -122,6 +125,7 @@ impl Town {
             mock_delay: Some("0.01".into()),
             persistent: true,
             args: Vec::new(),
+            autosave: false,
             child: None,
             stdin: None,
         }
@@ -170,6 +174,12 @@ impl Town {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let mut command = Command::new(env!("CARGO_BIN_EXE_host"));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // 验收会多次启动隔离世界，和桌面管理服务一样不为子进程弹控制台。
+            command.creation_flags(0x0800_0000);
+        }
         command
             .current_dir(&self.dir)
             .args(["--speed", "0", "--port", &port.to_string()])
@@ -186,6 +196,9 @@ impl Town {
         }
         if !self.persistent {
             command.arg("--no-save");
+        }
+        if self.autosave {
+            command.args(["--autosave-seconds", "0"]);
         }
         let mut child = command.spawn().unwrap();
         self.stdin = child.stdin.take();
@@ -254,6 +267,22 @@ impl Town {
     pub fn shutdown(&mut self) {
         self.close_stdin();
         assert!(self.wait_exit().success(), "stdin 关闭后未完成保存退出");
+    }
+
+    /// 存档 `saved` 提交时流水里的全部内容，一行一条，按写入的先后。只取清单记着的长度：
+    /// 文件里多出来的是后来才写的，不属于这一次提交。
+    #[track_caller]
+    pub fn history(&self, saved: &Value) -> Vec<Value> {
+        let mut lines = Vec::new();
+        for segment in saved["history"]["segments"].as_array().unwrap() {
+            let name = format!("{:06}.jsonl", segment["id"].as_u64().unwrap());
+            let bytes = fs::read(self.save().with_file_name("history").join(name)).unwrap();
+            let committed = &bytes[..segment["bytes"].as_u64().unwrap() as usize];
+            for line in committed.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+                lines.push(serde_json::from_slice(line).unwrap());
+            }
+        }
+        lines
     }
 
     /// 轮询存档直到满足条件。
@@ -329,6 +358,28 @@ pub fn connect_again(ws: &WebSocket<TcpStream>) -> WebSocket<TcpStream> {
 pub fn reply(ws: &mut WebSocket<TcpStream>, command: Value, kind: &str) -> Value {
     send(ws, command);
     until(ws, |m| m["type"] == kind)
+}
+
+/// 消耗页里这位居民的一行：今天的调用数、token、回复数与其中过时的。
+#[track_caller]
+pub fn usage_of(ws: &mut WebSocket<TcpStream>, id: &str) -> Value {
+    reply(ws, json!({"type":"get_usage"}), "usage")["residents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .expect("消耗页里没有这位居民")
+        .clone()
+}
+
+/// 读到第 `count` 份名册为止，返回读到的全部消息。
+#[track_caller]
+pub fn through_rosters(ws: &mut WebSocket<TcpStream>, count: usize) -> Vec<Value> {
+    let seen = std::cell::Cell::new(0);
+    received_until(ws, |m| {
+        seen.set(seen.get() + usize::from(m["type"] == "roster"));
+        seen.get() >= count
+    })
 }
 
 pub fn members(roster: &Value) -> Vec<Value> {

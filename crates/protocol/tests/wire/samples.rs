@@ -49,6 +49,16 @@ fn agent_view() -> ResidentAgentView {
             until: 490.0,
             event: Some(FactKind::Presence),
         }),
+        latest_goal: Some(GoalMark {
+            id: "read".into(),
+            updated_at: 431.0,
+        }),
+        declined_invitation: Some("i0".into()),
+    }
+}
+
+fn detail_view() -> ResidentDetailView {
+    ResidentDetailView {
         goals: vec![ResidentGoalView {
             id: "read".into(),
             title: "去图书馆读书".into(),
@@ -105,13 +115,6 @@ fn agent_view() -> ResidentAgentView {
                 }),
             }],
         }],
-        daily_calls: 3,
-        daily_limit: 120,
-        daily_tokens: 12_000,
-        daily_input_tokens: 10_000,
-        daily_cache_hit_tokens: 4_000,
-        replies: 3,
-        stale_replies: 1,
     }
 }
 
@@ -583,6 +586,7 @@ pub fn server_samples() -> Vec<ServerMsg> {
                 mock: false,
                 model: "m".into(),
                 persistent: true,
+                prefab_setup: None,
                 physiology: PhysiologySwitches::default(),
                 provider: "p".into(),
                 ready: true,
@@ -593,6 +597,17 @@ pub fn server_samples() -> Vec<ServerMsg> {
                 world_id: "w1".into(),
                 worldview: "小镇".into(),
             },
+        },
+        ServerMsg::PrefabSetupSaved {
+            request_id: "setup".into(),
+            ok: true,
+            message: "已保存".into(),
+            state: Some(PrefabSetupState {
+                id: "setup-1".into(),
+                plan: prefab_plan(),
+                next_step: 0,
+                joined: vec![],
+            }),
         },
         ServerMsg::WorldSettingsSaved {
             request_id: "r2".into(),
@@ -760,6 +775,7 @@ pub fn server_samples() -> Vec<ServerMsg> {
                 name: "服务商".into(),
                 base_url: "https://example.invalid/v1".into(),
                 key_mask: "sk-a…7890".into(),
+                model: "m1".into(),
             }],
             builtin_stale: true,
         },
@@ -790,6 +806,10 @@ pub fn server_samples() -> Vec<ServerMsg> {
             request_id: "req-1".into(),
             ok: true,
             message: "已设当前值".into(),
+        },
+        ServerMsg::ResidentDetail {
+            resident_id: "resident_ashu".into(),
+            detail: Some(detail_view()),
         },
         ServerMsg::Error {
             request_id: Some("op1".into()),
@@ -925,6 +945,16 @@ pub fn server_samples() -> Vec<ServerMsg> {
                 lifetime_calls: 30,
                 lifetime_tokens: 120_000,
                 residents: vec![usage_row()],
+            },
+        },
+        ServerMsg::AgentTrace {
+            state: AgentTraceView {
+                bytes: 41_000_000,
+                dir: "/data/towns/t1/logs".into(),
+                file_bytes: 32 << 20,
+                files: 3,
+                full_prompts: false,
+                keep_bytes: 256 << 20,
             },
         },
         ServerMsg::Population {
@@ -1379,10 +1409,7 @@ fn werewolf_roster() -> ServerMsg {
         last,
         reason: Some("把疑点引到传话上".into()),
     };
-    let mut roster = server_samples()
-        .into_iter()
-        .find(|m| matches!(m, ServerMsg::Roster { .. }))
-        .expect("有名册样本");
+    let mut roster = current_roster(current_sample_roster());
     if let ServerMsg::Roster { game_mode, .. } = &mut roster {
         *game_mode = Some(GameModeView::Werewolf(WerewolfView {
             phase: WerewolfPhase::LastWords,
@@ -1439,10 +1466,7 @@ fn werewolf_roster() -> ServerMsg {
 
 /// 名册里开着执剑人之夜：说过的话、亮过的票、执剑人的决定和结局都给全。
 fn swordholder_roster() -> ServerMsg {
-    let mut roster = server_samples()
-        .into_iter()
-        .find(|m| matches!(m, ServerMsg::Roster { .. }))
-        .expect("有名册样本");
+    let mut roster = current_roster(current_sample_roster());
     let seat = |seat, id: &str, name: &str, role, gone| SwordholderSeat {
         seat,
         id: id.into(),
@@ -1494,11 +1518,97 @@ fn swordholder_roster() -> ServerMsg {
     roster
 }
 
+fn frostlight_roster() -> ServerMsg {
+    let mut roster = current_roster(current_sample_roster());
+    if let ServerMsg::Roster { game_mode, .. } = &mut roster {
+        *game_mode = Some(GameModeView::Frostlight(FrostlightView {
+            phase: FrostlightPhase::Over,
+            now: 720.0,
+            until: 720.0,
+            storm_at: 600.0,
+            ends_at: 720.0,
+            temperature: -50.0,
+            shelter_temperature: 4.0,
+            cold_minutes: 0.0,
+            hunger_minutes: 0.0,
+            unrest_minutes: 0.0,
+            fuel: 12.5,
+            food: 8.0,
+            materials: 3.0,
+            heat: 2,
+            stress: 20.0,
+            hope: 65.0,
+            discontent: 23.0,
+            insulation: 1,
+            generator: "gen:town-square".into(),
+            stations: vec![FrostlightStation {
+                id: "fuel".into(),
+                name: "采煤站".into(),
+                locale: "gen:forest".into(),
+                available: 40.0,
+            }],
+            policies: FrostlightPolicies {
+                extended_shift: true,
+                soup: false,
+                mutual_aid: true,
+            },
+            aid_used: true,
+            people: vec![FrostlightPerson {
+                id: "resident_001".into(),
+                name: "林霜".into(),
+                role: "司炉员".into(),
+                contribution: 3,
+                gone: false,
+                work: Some(FrostlightWork {
+                    kind: "fuel".into(),
+                    locale: "gen:forest".into(),
+                    ends_at: 725.0,
+                }),
+            }],
+            news: vec![FrostlightNews {
+                at: 719.0,
+                text: "最后一批煤送到了中央热源".into(),
+            }],
+            ending: Some(FrostlightEnding {
+                kind: "warm_dawn".into(),
+                title: "灯火迎来黎明".into(),
+                text: "六个人一起挺过了风暴".into(),
+                survivors: 6,
+            }),
+        }));
+    }
+    roster
+}
+
+/// 合入旧客户端名册样本时留下的明细字段已从左移到角色卡；样本照当前协议给出。
+fn current_sample_roster() -> ServerMsg {
+    server_samples()
+        .into_iter()
+        .find(|m| matches!(m, ServerMsg::Roster { .. }))
+        .expect("有名册样本")
+}
+
+fn current_roster(mut roster: ServerMsg) -> ServerMsg {
+    if let ServerMsg::Roster { locales, .. } = &mut roster {
+        for member in locales.iter_mut().flat_map(|locale| &mut locale.members) {
+            if let Some(agent) = &mut member.resident_agent {
+                agent.latest_goal = Some(GoalMark {
+                    id: "read".into(),
+                    updated_at: 431.0,
+                });
+                agent.declined_invitation = None;
+            }
+        }
+    }
+    roster
+}
+
 pub fn shape_samples() -> (Vec<ServerMsg>, Vec<ClientMsg>) {
     (
         vec![
             werewolf_roster(),
             swordholder_roster(),
+            frostlight_roster(),
             // 玩法里说的一段话：日志正文照旧，另带发言人、座号、场合和原话
             ServerMsg::Event {
                 sim_minutes: 2588.0,
@@ -1542,6 +1652,11 @@ pub fn shape_samples() -> (Vec<ServerMsg>, Vec<ClientMsg>) {
             },
         ],
         vec![
+            ClientMsg::SetGameMode {
+                request_id: "mode-frostlight".into(),
+                world_id: "w1".into(),
+                game_mode: Some(GameModeChoice::Frostlight { seed: Some(7), duration_hours: Some(6) }),
+            },
             ClientMsg::SetGameMode {
                 request_id: "mode-2".into(),
                 world_id: "w1".into(),
@@ -1661,6 +1776,7 @@ pub fn client_samples() -> Vec<ClientMsg> {
         id: "p1".into(),
         name: "服务商".into(),
         base_url: "https://example.invalid/v1".into(),
+        model: "m1".into(),
     };
     vec![
         ClientMsg::Avatar {
@@ -1699,6 +1815,19 @@ pub fn client_samples() -> Vec<ClientMsg> {
             kind: Some(WeatherKind::Rain),
         },
         ClientMsg::GetWorldSettings,
+        ClientMsg::BeginPrefabSetup {
+            request_id: "setup".into(),
+            world_id: "w1".into(),
+            setup_id: "setup-1".into(),
+            expected_revision: 0,
+            plan: prefab_plan(),
+        },
+        ClientMsg::AdvancePrefabSetup {
+            request_id: "step".into(),
+            world_id: "w1".into(),
+            setup_id: "setup-1".into(),
+            next_step: 0,
+        },
         ClientMsg::SetWorldview {
             request_id: "r2".into(),
             world_id: "w1".into(),
@@ -1740,6 +1869,16 @@ pub fn client_samples() -> Vec<ClientMsg> {
             request_id: "mode-1".into(),
             world_id: "w1".into(),
             game_mode: Some(GameModeChoice::Tide { seed: Some(51) }),
+        },
+        ClientMsg::GameModeControl {
+            request_id: "heat-1".into(),
+            world_id: "w1".into(),
+            command: GameModeAction {
+                action: "heat".into(),
+                target: Some("2".into()),
+                text: None,
+                reason: None,
+            },
         },
         ClientMsg::SetPhysiology {
             request_id: "r1".into(),
@@ -1860,6 +1999,9 @@ pub fn client_samples() -> Vec<ClientMsg> {
             api_key: None,
         },
         ClientMsg::GetAgentConfig {
+            resident: Some("resident_ashu".into()),
+        },
+        ClientMsg::WatchResident {
             resident: Some("resident_ashu".into()),
         },
         ClientMsg::SetPersona {
@@ -1994,5 +2136,28 @@ pub fn client_samples() -> Vec<ClientMsg> {
             request_id: "req-1".into(),
             limits: limits(),
         },
+        ClientMsg::GetAgentTrace,
+        ClientMsg::SetAgentTrace {
+            request_id: "req-1".into(),
+            full_prompts: true,
+        },
     ]
+}
+
+fn prefab_plan() -> PrefabSetupPlan {
+    serde_json::from_value(json!({
+        "prefab": "test",
+        "selection": { "players": 1, "models": [{"provider": "p", "model": "m"}], "needs": false, "picks": [["身份", "fixed"]], "seeds": [["身份", 51]] },
+        "steps": [
+            {"kind": "worldview", "text": "小镇"},
+            {"kind": "physiology", "switches": {"fullness": false,"energy": false,"water": false,"health": false,"weather": false}},
+            {"kind": "climate", "climate": "temperate"},
+            {"kind": "weather", "weather": "clear"},
+            {"kind": "remove_prop", "id": "old"},
+            {"kind": "place_prop", "instance": {"id": "user:test", "definition": "core:bench@1", "locale": "square"}},
+            {"kind": "limits", "limits": {"calls_per_day": 100}},
+            {"kind": "join", "template_id": "builtin:ashu", "model": {"provider": "p", "model": "m"}, "persona": {"name": "阿树"}},
+            {"kind": "game_mode", "choice": {"kind": "tide", "seed": 1}}
+        ]
+    })).unwrap()
 }

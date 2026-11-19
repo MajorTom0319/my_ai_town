@@ -27,10 +27,14 @@ pub(crate) struct Args {
     pub town_id: Option<String>,
     pub ready_file: Option<PathBuf>,
     pub connection_token: Option<String>,
+    /// 管理进程私有的保存退出通道；不把口令交给玩家页面。
+    pub shutdown_token: Option<String>,
     /// 管理进程启动时传入：stdin 关闭即视为父进程退出，保存后退出。
     pub stop_on_stdin_close: bool,
     /// 自动整理至少攒够多少条新实录；固定回复模式下调小，便于本地演示看到概览。
     pub summary_batch: usize,
+    /// 周期存盘隔多久一次；缺省用存档的 `AUTOSAVE_INTERVAL`。
+    pub autosave: Option<Duration>,
 }
 
 impl Args {
@@ -48,8 +52,10 @@ impl Args {
             town_id: None,
             ready_file: None,
             connection_token: None,
+            shutdown_token: None,
             stop_on_stdin_close: false,
             summary_batch: crate::manuscript::AUTO_LINES,
+            autosave: None,
         };
         let mut save_enabled = true;
         let mut mock_delay = Duration::from_secs(3);
@@ -65,6 +71,7 @@ impl Args {
                 "--town-id" => a.town_id = Some(value()?),
                 "--ready-file" => a.ready_file = Some(PathBuf::from(value()?)),
                 "--connection-token" => a.connection_token = Some(value()?),
+                "--shutdown-token" => a.shutdown_token = Some(value()?),
                 "--port" => a.port = parse_number(&arg, &value()?)?,
                 "--speed" => {
                     let speed: f64 = parse_number(&arg, &value()?)?;
@@ -86,6 +93,15 @@ impl Args {
                     mock_delay = Duration::from_secs_f64(parse_number(&arg, &value()?)?)
                 }
                 "--stop-on-stdin-close" => a.stop_on_stdin_close = true,
+                "--autosave-seconds" => {
+                    let seconds: f64 = parse_number(&arg, &value()?)?;
+                    if !(seconds.is_finite() && (0.0..=3600.0).contains(&seconds)) {
+                        return Err(HostError::Runtime(
+                            "--autosave-seconds 必须在 0–3600 内".into(),
+                        ));
+                    }
+                    a.autosave = Some(Duration::from_secs_f64(seconds));
+                }
                 other => return Err(HostError::Runtime(format!("未知参数 {other}"))),
             }
         }

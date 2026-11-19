@@ -115,19 +115,7 @@ impl Runtime {
         request_id: String,
         choice: Option<GameModeChoice>,
     ) -> Outcome {
-        let roll = |seed: Option<u32>| Some(seed.unwrap_or_else(|| rand::random::<u32>().max(1)));
-        let choice = choice.map(|c| match c {
-            GameModeChoice::Tide { seed } => GameModeChoice::Tide { seed: roll(seed) },
-            GameModeChoice::Werewolf { seed, day_hours } => GameModeChoice::Werewolf {
-                seed: roll(seed),
-                day_hours,
-            },
-            GameModeChoice::Swordholder { seed, day_hours } => GameModeChoice::Swordholder {
-                seed: roll(seed),
-                day_hours,
-            },
-            GameModeChoice::Survival10 { seed } => GameModeChoice::Survival10 { seed: roll(seed) },
-        });
+        let choice = choice.map(randomized_game_mode);
         let result = self
             .transact(|rt| {
                 rt.world.set_game_mode(choice.as_ref())?;
@@ -154,9 +142,31 @@ impl Runtime {
                     Some(GameModeChoice::Survival10 { .. }) => {
                         "聪明人小镇已打开：七人十日、21袋公粮、每天最多4袋；偶数天18:00晚餐后前往篝火广场，18:30晚会开始，逐人发言后统一记名投票".into()
                     }
+                    Some(GameModeChoice::Frostlight { .. }) => {
+                        "霜灯镇已开局：安排燃料与粮食，维持热源，带着居民熬过风暴".into()
+                    }
                     None => "玩法已关掉，世界恢复原样".into(),
                 }),
             })
+    }
+
+    /// 玩法管理与普通世界操作使用同一存盘事务；失败不会留下已扣物资或已生效的法令。
+    pub(crate) fn control_game_mode(
+        &mut self,
+        request_id: String,
+        command: &protocol::GameModeAction,
+    ) -> Outcome {
+        let result = self
+            .transact(|rt| rt.world.game_mode_control(command).map_err(HostError::from))
+            .map_err(|aborted| aborted.to_string());
+        let ok = result.is_ok();
+        let message = result.unwrap_or_else(|error| error);
+        Outcome::reply(ServerMsg::WorldSettingsSaved {
+            request_id,
+            ok,
+            message,
+        })
+        .and_all(self.roster())
     }
 
     /// 打开或关掉陌生环境：世界暂停，居民的旧安排作废、重新观察（已知地图变了）。
@@ -193,7 +203,7 @@ impl Runtime {
     }
 
     /// 开关变化后世界暂停，所有居民的旧安排作废、重新观察；数值不动。
-    fn set_physiology(
+    pub(crate) fn set_physiology(
         &mut self,
         revision: u64,
         switches: PhysiologySwitches,
@@ -218,7 +228,11 @@ impl Runtime {
     }
 
     /// 修改前的检查：修订号、非空、长度，以及每位居民的人设加世界观不超上限。返回修改后的设定。
-    fn check_worldview(&self, revision: u64, text: &str) -> Result<WorldSettings, HostError> {
+    pub(crate) fn check_worldview(
+        &self,
+        revision: u64,
+        text: &str,
+    ) -> Result<WorldSettings, HostError> {
         if revision != self.world_settings.revision {
             return Err(HostError::Rejected(
                 "世界设定已被其他页面修改，请重新读取后再保存".into(),
@@ -244,7 +258,7 @@ impl Runtime {
     }
 
     /// 事务里的改动：世界停下，每位居民作废当前动作版本（迟到模型回复不能执行）并改用新指令。
-    fn apply_worldview(&mut self, next: WorldSettings) -> Result<(), HostError> {
+    pub(crate) fn apply_worldview(&mut self, next: WorldSettings) -> Result<(), HostError> {
         self.speed = 0.0;
         for r in self.population.residents.values() {
             self.driver.runtime.world_changed(
@@ -270,6 +284,7 @@ impl Runtime {
             model: self.driver.target.model.clone(),
             persistent: self.store.is_some(),
             physiology: self.world.physiology(),
+            prefab_setup: self.world_settings.prefab_setup.clone(),
             provider: self.driver.target.provider.clone(),
             ready: self.world_settings.ready(),
             recording: self.world_settings.recording,
@@ -333,5 +348,29 @@ impl Runtime {
             }
         }
         msg
+    }
+}
+
+/// 普通打开与预制开局共用取种子规则；只在事务提交前取一次。
+pub(crate) fn randomized_game_mode(c: GameModeChoice) -> GameModeChoice {
+    let roll = |seed: Option<u32>| Some(seed.unwrap_or_else(|| rand::random::<u32>().max(1)));
+    match c {
+        GameModeChoice::Tide { seed } => GameModeChoice::Tide { seed: roll(seed) },
+        GameModeChoice::Werewolf { seed, day_hours } => GameModeChoice::Werewolf {
+            seed: roll(seed),
+            day_hours,
+        },
+        GameModeChoice::Swordholder { seed, day_hours } => GameModeChoice::Swordholder {
+            seed: roll(seed),
+            day_hours,
+        },
+        GameModeChoice::Survival10 { seed } => GameModeChoice::Survival10 { seed: roll(seed) },
+        GameModeChoice::Frostlight {
+            seed,
+            duration_hours,
+        } => GameModeChoice::Frostlight {
+            seed: roll(seed),
+            duration_hours,
+        },
     }
 }

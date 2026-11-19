@@ -13,7 +13,12 @@ export const PROP_BASE = 0.3
 
 export interface PropPlacement {
   id: string
+  /** 像素图；没有图、只有立体搭法的道具是空的 */
   url: string
+  /** 道具定义编号：登记了搭法的搭成立体的（propBuilds.ts），不立牌 */
+  definition?: string
+  /** 合成一摞画的书有几本 */
+  amount?: number
   /** 道具图中心（地图坐标） */
   x: number
   y: number
@@ -31,6 +36,8 @@ export class PropStandees {
   private readonly all = new Map<string, Standing>()
   private readonly textures = new Map<string, THREE.Texture>()
   private readonly loader = new THREE.TextureLoader()
+  /** 道具立在地图上一点要抬多高（看台的台阶上） */
+  lift: (x: number, y: number) => number = () => 0
 
   /** prepare：每个新立牌的材质过一遍（接光照图） */
   constructor(
@@ -83,6 +90,7 @@ export class PropStandees {
 
   private place({ mesh, placement: p }: Standing) {
     stand(mesh, p.x, p.y, this.tilt, p.size * PROP_BASE)
+    mesh.position.y += this.lift(p.x, p.y)
   }
 
   private remove(id: string) {

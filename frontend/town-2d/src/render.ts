@@ -31,7 +31,7 @@ import { standUpright, uprightRatio } from './map/upright'
 import { ThoughtBubbles } from './map/bubbles'
 import { ResidentLayer } from './map/residents'
 import { PromptLayer } from './map/prompts'
-import { propArtwork } from './map/propArt'
+import { PROP_ART_SIZE, propArtwork } from './map/propArt'
 import { PlaceOverlay, type OverlayProp } from './map/placeOverlay'
 import { cellNear, freeNear } from 'town-shared/props/placeGrid'
 
@@ -51,6 +51,7 @@ import { LEGACY_UNITS_PER_METRE, OUTDOOR_SPACE, roomRect } from './map/grid'
 import { village, type MapTheme } from './map/themes'
 import { el } from 'town-shared/svg'
 import type { DepthBlur, Quality } from 'town-shared/quality'
+import type { WeatherKind } from 'town-shared/weather/types'
 // 地图装配：静态图层、人物/气泡、镜头各自拥有状态；公共观察接口保持不变。
 
 /** 跟随中一帧里人挪了这么远（地图单位）算瞬移（进门出门、换地点，立牌也是直接放过去）：镜头慢慢挪过去 */
@@ -77,6 +78,8 @@ export interface TownMapOptions {
   theme?: MapTheme
   /** 调用方已经算好的地面（建镇预览先拿它画缩略图）；不给就在这里算 */
   ground?: Ground
+  /** 屋里摆陈设（只给画面看的桌椅、绿植、地毯）：随应用发的内置地图才摆 */
+  furnished?: boolean
 }
 
 export class TownMap {
@@ -182,7 +185,17 @@ export class TownMap {
   }
   private markerScale = 1
   /** 道具立牌最近一次实际画的位置，名字和点击区跟着它 */
-  private drawnProps: { id: string; x: number; y: number; base: number; size: number }[] = []
+  private drawnProps: {
+    id: string
+    x: number
+    y: number
+    base: number
+    size: number
+    /** 立体搭的道具：选中、指着时场景在它身上叠亮色，点击区按它的宽高 */
+    model: boolean
+    width: number
+  }[] = []
+  private readonly furnished: boolean
   /** 行走坐标的比例由后端随化身状态给出，不在前端复制一份 */
   private walkUnits?: number
   /** 本页正在操控的人：立体场景里他的立牌按本地预测画（见 map/avatarMotion.ts） */
@@ -415,6 +428,7 @@ export class TownMap {
 
   constructor(options: TownMapOptions) {
     const { atlas, topology, container } = options
+    this.furnished = !!options.furnished
     this.sourceAtlas = atlas
     this.spatial = options.spatial
     this.topology = topology
@@ -583,11 +597,13 @@ export class TownMap {
       .then(({ HdScene }) => {
         const container = this.svg.parentElement
         if (this.disposed || !container || !this.ground) return
-        this.hd = new HdScene(atlas, this.ground, container, this.svg)
+        this.hd = new HdScene(atlas, this.ground, container, this.svg, this.furnished)
+        if (this.lastRoster) this.hd.setGameMode(this.lastRoster.game_mode ?? null, this.walkUnit)
         this.ground = undefined
         this.svg.classList.add('hd2d')
         this.applyMarkerScale()
-        if (this.clock) this.hd.setClock(...this.clock)
+        if (this.scenery) this.hd.setScenery(...this.scenery)
+        else if (this.clock) this.hd.setClock(...this.clock)
         // 名册往往在立体场景加载前就到了；玩法 HUD 建在 hd 里，建好后补发最近一份状态。
         if (this.metre) this.hd.setGameMode(this.lastRoster?.game_mode ?? null, this.metre)
         this.rooms.attach(this.svg, this.hd.houses)
@@ -616,12 +632,8 @@ export class TownMap {
       .finally(() => this.loaded())
   }
 
-  /** 取景只读图集：围绕本镇真正的广场组织街景，俯视容纳道路和所有建筑，不依赖默认地图坐标。 */
-  private showCameraPreset(overhead: boolean) {
-    const hd = this.hd
-    if (!hd) return
-    hd.setYaw(0)
-    hd.setPitch(overhead ? PITCH_MAX : DEFAULT_PITCH)
+  /** 全镇占的一块：地面、房屋和道路的外框；图集是空的就取整张画布 */
+  private contentBox(): { x: number; y: number; width: number; height: number } {
     const atlas = this.sourceAtlas
     let x0 = Infinity,
       y0 = Infinity,
@@ -650,8 +662,68 @@ export class TownMap {
       x1 = atlas.canvas.width
       y1 = atlas.canvas.height
     }
-    const width = Math.max(1, x1 - x0),
-      height = Math.max(1, y1 - y0)
+    return { x: x0, y: y0, width: Math.max(1, x1 - x0), height: Math.max(1, y1 - y0) }
+  }
+
+  /** 镇中心：最大的那片有名字的广场；没有广场就是全镇的正中间 */
+  townHeart(): [number, number] {
+    // 没有名字的铺装（河堤）不是地点，镜头不对着它
+    const plaza = this.sourceAtlas.regions
+      .filter((region) => region.kind === 'plaza' && region.name && region.cells.length)
+      .sort((a, b) => b.cells.length * b.cell_size ** 2 - a.cells.length * a.cell_size ** 2)[0]
+    if (plaza)
+      return plaza.cells.reduce<[number, number]>(
+        (point, [x, y]) => [
+          point[0] + ((x + 0.5) * plaza.cell_size) / plaza.cells.length,
+          point[1] + ((y + 0.5) * plaza.cell_size) / plaza.cells.length,
+        ],
+        [0, 0]
+      )
+    const box = this.contentBox()
+    return [box.x + box.width / 2, box.y + box.height / 2]
+  }
+
+  /** 拍一张全镇的小图当封面（见 GameMap.cover）：正面、默认俯角，全镇装进画布正中间和小图同样长宽比的
+   *  那一块，四边留一点给屋顶和海岸 */
+  cover(width: number, height: number): string | undefined {
+    const hd = this.hd
+    const view = this.svg.getBoundingClientRect()
+    if (!hd || !view.width || !view.height) return undefined
+    const before = this.director.shot()
+    const whole = this.camera.showingWhole
+    const box = this.contentBox()
+    hd.setAngles(DEFAULT_PITCH, 0, true)
+    const crop = Math.min(view.width, (view.height * width) / height)
+    const need = Math.max(box.width, (box.height * hd.verticalScale * width) / height) * 1.12
+    this.camera.setShot([box.x + box.width / 2, box.y + box.height / 2], (need * view.width) / crop)
+    const image = hd.capture(width, height, () => {
+      hd.setAngles(before.pitch, before.yaw, true)
+      if (whole) this.camera.resetView()
+      else this.camera.setShot(before.center, before.width)
+    })
+    try {
+      return image.toDataURL('image/jpeg', 0.82)
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 此刻的画面（见 GameMap.still） */
+  still(maxWidth: number): string | undefined {
+    try {
+      return this.hd?.grab(maxWidth).toDataURL('image/jpeg', 0.86)
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 取景只读图集：围绕本镇真正的广场组织街景，俯视容纳道路和所有建筑，不依赖默认地图坐标。 */
+  private showCameraPreset(overhead: boolean) {
+    const hd = this.hd
+    if (!hd) return
+    hd.setYaw(0)
+    hd.setPitch(overhead ? PITCH_MAX : DEFAULT_PITCH)
+    const { x: x0, y: y0, width, height } = this.contentBox()
     let area: CameraArea
     if (overhead) {
       // 屋脊仍高于地面，四边留空让最外侧的屋顶、树冠与水岸能完整入镜。
@@ -662,21 +734,7 @@ export class TownMap {
         height: height * 1.2,
       }
     } else {
-      const plazas = atlas.regions.filter(
-        (region) => region.kind === 'plaza' && region.cells.length
-      )
-      const plaza = plazas.sort(
-        (a, b) => b.cells.length * b.cell_size ** 2 - a.cells.length * a.cell_size ** 2
-      )[0]
-      const center = plaza
-        ? plaza.cells.reduce(
-            (point, [x, y]) => [
-              point[0] + ((x + 0.5) * plaza.cell_size) / plaza.cells.length,
-              point[1] + ((y + 0.5) * plaza.cell_size) / plaza.cells.length,
-            ],
-            [0, 0]
-          )
-        : [x0 + width / 2, y0 + height / 2]
+      const center = this.townHeart()
       // 广场位于清晰中景偏下处，镜头向北多留一些空间给屋顶、树林与远雾。
       const viewWidth = width * 0.58,
         viewHeight = height * 0.64
@@ -697,6 +755,7 @@ export class TownMap {
     this.weather = new WeatherLayer(this.svg, atlas)
     this.svg.insertBefore(this.weather.layer, this.residents.layer)
     if (this.lastRoster) this.weather.handleMsg(this.lastRoster)
+    if (this.scenery) this.weather.setScenery(...this.scenery)
   }
   /** 地面随俯角倾斜：地图视口纵向压扁，立着的文字按比例拉回，房间名跟着屋顶高度走 */
   private applyTilt() {
@@ -734,6 +793,15 @@ export class TownMap {
       ])
   }
   private clock?: [number, string | undefined]
+  /** 选镇页赏景时玩家选的时刻和天气（见 setScenery）；有它时不看名册的时钟 */
+  private scenery?: [number, WeatherKind]
+
+  /** 选镇页赏景：画面换成这个时刻和天气，世界本身不变（预览本来就不连世界） */
+  setScenery(minutes: number, weather: WeatherKind) {
+    this.scenery = [minutes, weather]
+    this.hd?.setScenery(minutes, weather)
+    this.weather?.setScenery(minutes, weather)
+  }
 
   /** 立体场景跟上房子的开合（见 RoomCovers）、村民和道具立牌；fresh 表示刚来了一份名册 */
   private refreshRooms(fresh = false) {
@@ -770,11 +838,22 @@ export class TownMap {
       if (!id) return
       const selected = this.scene.props.get(id)?.classList.contains('selected-prop')
       this.scene.propLabels.get(id)?.classList.toggle('named', on || !!selected)
+      this.hoveredProp = on ? id : this.hoveredProp === id ? null : this.hoveredProp
+      this.pickProps()
     }
     for (const type of ['pointerover', 'focusin'])
       this.svg.addEventListener(type, (e) => toggle(e.target, true))
     for (const type of ['pointerout', 'focusout'])
       this.svg.addEventListener(type, (e) => toggle(e.target, false))
+  }
+
+  /** 鼠标指着（或键盘聚焦）的道具 */
+  private hoveredProp: string | null = null
+
+  /** 把选中的、指着的道具告诉立体场景：立体搭的道具在身上叠一层亮色 */
+  private pickProps() {
+    const picked = this.svg.querySelector('.pp.selected-prop')?.getAttribute('data-prop-id')
+    this.hd?.setPickedProp(picked ?? null, this.hoveredProp)
   }
 
   /** 道具的点击区和名字跟着立牌走：点击区在立牌中心，名字挂在立牌头顶再高一点 */
@@ -789,9 +868,18 @@ export class TownMap {
       const [x, y] = this.camera.project([p.x, p.y])
       const base = y + p.base - p.y
       const centre = base - (p.size * up) / 2
-      this.scene.props
-        .get(p.id)
-        ?.setAttribute('transform', `translate(${x} ${centre}) scale(1 ${up})`)
+      const shape = this.scene.props.get(p.id)
+      shape?.setAttribute('transform', `translate(${x} ${centre}) scale(1 ${up})`)
+      // 立体道具的点击区按它的宽高，选中框不画（场景里已经亮了）
+      if (shape && p.model && shape.dataset.box !== `${p.width},${p.size}`) {
+        shape.dataset.box = `${p.width},${p.size}`
+        shape.classList.add('modelled')
+        const target = shape.querySelector('.prop-art-target, .book-pile-target')
+        target?.setAttribute('x', String(-p.width / 2))
+        target?.setAttribute('width', String(p.width))
+        target?.setAttribute('y', String(-p.size / 2))
+        target?.setAttribute('height', String(p.size))
+      }
       const label = this.scene.propLabels.get(p.id)
       if (!label) continue
       label.setAttribute('x', String(x))
@@ -839,12 +927,21 @@ export class TownMap {
   /** 盖着屋顶的房子里的道具连名字藏起来；有像素图的道具在立体场景里立起来，SVG 里的图只留作点击区 */
   private coverProps(covered: (p: [number, number]) => boolean): PropPlacement[] {
     const standees: PropPlacement[] = []
-    for (const { id, at, art } of this.placed) {
+    for (const { id, at, art, count } of this.placed) {
       const hidden = covered(at)
       this.scene.props.get(id)?.classList.toggle('roofed', hidden)
       this.scene.propLabels.get(id)?.classList.toggle('roofed', hidden)
-      if (art)
-        standees.push({ id, url: art.url, x: at[0], y: at[1], size: art.size, visible: !hidden })
+      // 没有像素图的也交过去：登记了立体搭法的道具不靠图
+      standees.push({
+        id,
+        url: art?.url ?? '',
+        definition: this.propDefinitions.get(id),
+        amount: count,
+        x: at[0],
+        y: at[1],
+        size: art?.size ?? PROP_ART_SIZE,
+        visible: !hidden,
+      })
     }
     return standees
   }
@@ -1354,8 +1451,9 @@ export class TownMap {
         DEV_CLOCK?.minutes ?? msg.sim_minutes,
         DEV_CLOCK?.weather ?? msg.environment?.kind,
       ]
-      this.hd?.setClock(...this.clock)
-      if (this.metre) this.hd?.setGameMode(msg.game_mode ?? null, this.metre)
+      if (!this.scenery) this.hd?.setClock(...this.clock)
+      // 平面图集同样可以开玩法；米制比例沿用行走坐标，不以旧三维 spatial 数据作为门槛。
+      this.hd?.setGameMode(msg.game_mode ?? null, this.walkUnit)
     }
     if (msg.type === 'population') {
       this.templates = new Map(msg.population.residents.map((r) => [r.id, r.template_id]))
@@ -1440,6 +1538,7 @@ export class TownMap {
     this.svg.querySelectorAll('.pl.named').forEach((el) => el.classList.remove('named'))
     shape?.classList.add('selected-prop')
     this.scene.propLabels.get(id)?.classList.add('named')
+    this.pickProps()
   }
   onReset() {
     this.lastRoster = undefined

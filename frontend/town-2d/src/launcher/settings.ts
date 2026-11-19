@@ -1,14 +1,16 @@
 // 首页的「设定」：内置模型、模型服务、建镇用的模型、声音、显示——这些不属于哪个小镇，所有小镇共用；
 // 世界观、村民、额度跟着小镇走，进小镇后在设定里改。模型服务经管理服务的 /api/towns/models 读写，
 // 内置模型的下载与更新见 town-shared/models/builtin.ts。
-// 还没有能用的模型时，标题下面一张「还差一步」的提示卡：应用带着内置模型就请玩家下载它（下载时卡片换成进度），
+// 入口是右上角的「设定」方钮。还没有能用的模型时，品牌下面一张「还差一步」的提示卡：应用带着内置模型就请玩家下载它（下载时卡片换成进度），
 // 也可以连在线服务；点「以后再说」缩成一行小字，「设定」上留个小绿点。内置模型有新版本、又关了自动更新时，
 // 「设定」上也亮小绿点。
 import { effectsPreference } from 'town-shared/audio/effects'
 import { storyMusicPreference } from 'town-shared/audio/controller'
+import type { MusicControls } from 'town-shared/audio/music'
 import { button, el, query } from 'town-shared/dom'
 import { errorText } from 'town-shared/format'
 import { gameIcon } from 'town-shared/game/icons'
+import { pixelIcon } from 'town-shared/game/pixel'
 import {
   connectModel,
   hasModel,
@@ -34,7 +36,13 @@ import {
 } from 'town-shared/models/builtin'
 import { createBuiltinRows } from 'town-shared/models/builtinRows'
 import { onBack } from 'town-shared/platform'
-import { BUILTIN, PRESETS, modelOptions, type ProviderModelOption } from 'town-shared/providers'
+import {
+  BUILTIN,
+  PRESETS,
+  modelOptions,
+  providerRow,
+  type ProviderModelOption,
+} from 'town-shared/providers'
 import { settingRow } from 'town-shared/settings/controls'
 import { createDisplayPage } from 'town-shared/settings/display'
 import { createSoundPage } from 'town-shared/settings/sound'
@@ -76,11 +84,11 @@ function homeTransport(): ModelTransport & { load(): Promise<ModelConfig> } {
   }
 }
 
-export function installHomeSettings(deps: { music: { enabled(): boolean; toggle(): void } }) {
+export function installHomeSettings(deps: { music: MusicControls }) {
   const transport = homeTransport()
-  const entry = button('', () => open(), 'launcher-settings')
-  entry.append(gameIcon('settings', true), el('span', '设定'))
-  query(document, '.launcher-brand').append(entry)
+  const entry = button('', () => open(), 'launcher-settings hud-button')
+  entry.append(pixelIcon('gear'), el('span', '设定'))
+  query(document, '#launcher-music-toggle').before(entry)
   const connect = (provider?: string) =>
     connectModel(transport, {
       title: '连接模型服务',
@@ -125,7 +133,7 @@ export function installHomeSettings(deps: { music: { enabled(): boolean; toggle(
   const ready = el('div', '', 'model-line ok')
   ready.append(el('i'), el('span', '内置模型下好了，进小镇请村民吧'))
   prompt.hidden = line.hidden = ready.hidden = true
-  query(document, '.launcher-heading').after(prompt, line, ready)
+  query(document, '.launcher-notes').prepend(prompt, line, ready)
   let readyTimer = 0
   onBuiltinInstalled((first) => {
     if (!first) return
@@ -164,11 +172,7 @@ export function installHomeSettings(deps: { music: { enabled(): boolean; toggle(
     el('h2', '模型服务'),
     el('p', '村民靠它思考。密钥只保存在这台设备上，所有小镇共用。', 'hint'),
     modelRows,
-    el(
-      'p',
-      '火山方舟、Ollama、自定义地址这些要填模型名的服务，进入小镇后在「设定 · 模型服务」里配置。',
-      'hs-note'
-    ),
+    el('p', 'Ollama、自定义地址等服务，进入小镇后在「设定 · 模型服务」里配置。', 'hs-note'),
     status
   )
   const toolRows = el('div', '', 'set-rows')
@@ -255,7 +259,7 @@ export function installHomeSettings(deps: { music: { enabled(): boolean; toggle(
     try {
       await transport.save({
         active: { provider: choice.provider, model: choice.model },
-        providers: config.providers.map(({ id, name, base_url }) => ({ id, name, base_url })),
+        providers: config.providers.map(providerRow),
         keys: [],
       })
       status.textContent = '已保存'

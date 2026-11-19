@@ -3,6 +3,7 @@
 // 静态图集先画（ws 断了图也在），Roster 流驱动活物层与各面板；人物身份只来自服务器名册。
 import './style.css'
 import { createGameAudio } from './audio/controller'
+import { createMusicPlayer } from './audio/player'
 import type { MusicWorld } from './audio/scene'
 import { createConnection, type ConnectionEvents, type GameConnection } from './connection'
 import { $, query } from './dom'
@@ -12,6 +13,7 @@ import type { MapEntry, Topology } from './mapDocument'
 import { installLayout } from './shell/layout'
 import { createPanels, type Panels } from './shell/panels'
 import { createReconnectHint } from './shell/reconnect'
+import { installFirstRun } from './shell/firstRun'
 import { createGameMenu } from './shell/menu'
 import { installMapButtons, showConnection } from './shell/topbar'
 import { reopenTown } from './townApi'
@@ -23,17 +25,20 @@ import { createTips } from './mobile/tips'
 import { trackMapInsets } from './mapView'
 import { onBack, systemBars } from './platform'
 import { useTownCreation } from './townWorldview'
+import { bindGameModeControls } from './gameModeControls'
 
 export function startGameShell(
   selectedMap: MapEntry,
   map: GameMap,
   topology: Topology,
   decorate: () => void,
-  /** musicWorld：地图风格定下放哪个世界的曲子，没有按海岸小镇；connection：重演录像时换掉 WebSocket */
+  /** musicWorld：地图风格定下放哪个世界的曲子，没有按海岸小镇；connection：重演录像时换掉 WebSocket；
+   *  worldview：地图自带的世界观（内置地图才有），没有建镇建议时开局向导默认用它 */
   options: {
     normalSpeed?: number
     musicWorld?: MusicWorld
     connection?: (events: ConnectionEvents) => GameConnection
+    worldview?: string
   } = {}
 ) {
   // 界面类型只在这里定一次，作为参数交给各面板
@@ -103,8 +108,8 @@ export function startGameShell(
         }
       )
   const normalSpeed = options.normalSpeed ?? 1
-  // 一句话建的小镇：世界观建议给首次对话框和开局向导，适合住进来的人给向导
-  useTownCreation(selectedMap.id, selectedMap.creation)
+  // 一句话建的小镇：世界观建议给首次对话框和开局向导，适合住进来的人给向导；内置地图自带的世界观同样用
+  useTownCreation(selectedMap.id, selectedMap.creation, options.worldview)
   const inputs = { normalSpeed, game, selectedMap, map, events, localeName, topology, replay }
   const panels = createPanels({
     ...inputs,
@@ -119,6 +124,7 @@ export function startGameShell(
     listeners.signal
   )
   const tips = createTips(map)
+  bindGameModeControls($('map'), panels.worldSettings.controlGameMode, listeners.signal, replay)
   panels.registry.add(tips.panel)
   wireMap(map, panels, tips.picked)
   systemBars('paper')
@@ -160,17 +166,11 @@ export function startGameShell(
   panels.models.subscribe(prefabSetup.refresh)
   // 回来的玩家（向导已走过）直接从手势提示开始；看过的提示不会再出
   if (guideDone()) tips.start()
-  let guideOpened = false
-  // 每个新世界（还没设世界观）都走向导：第一次从头讲起，以后从「请居民」开始；预制小镇走开局设置
-  panels.worldSettings.setFirstRun(() => {
-    if (!guideOpened) {
-      guideOpened = true
-      // 重置了世界（世界观面板已随重置关上）；开着整页设定时也先回到地图，向导走完正好看到新来的人
-      if (panels.session.inSettings()) panels.session.exit()
-      if (prefab) prefabSetup.open(prefab)
-      else guide.open(guideDone() ? 2 : 0)
-    }
-    return true
+  installFirstRun(panels.worldSettings, () => {
+    // 重置后回到地图，向导走完正好看到新来的人。
+    if (panels.session.inSettings()) panels.session.exit()
+    if (prefab) prefabSetup.open(prefab)
+    else guide.open(guideDone() ? 2 : 0)
   })
   const resetTips = () => {
     tips.reset()
@@ -198,6 +198,15 @@ export function startGameShell(
     avatar: panels.avatar,
   })
   back.front()
+  const musicPlayer = createMusicPlayer(audio.music, {
+    host: $('map'),
+    compactHost: document.querySelector<HTMLElement>('.mobile-dock') ?? undefined,
+    placement: 'game',
+    onOpen: () => {
+      menu.close()
+      panels.avatar.stopMoving()
+    },
+  })
   // 面板盖住地图的边变了：告诉镜头；盖得更多时，正在看的村民若被盖住就挪到露出来的那块
   trackMapInsets(
     $('map'),
@@ -230,6 +239,7 @@ export function startGameShell(
   return {
     dispose() {
       listeners.abort()
+      musicPlayer.dispose()
       chrome.dispose()
       back.dispose()
       offGuideBack()
