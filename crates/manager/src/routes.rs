@@ -23,14 +23,45 @@ pub fn handle(app: &App, req: &Request) -> Response {
     }
 }
 
-fn dispatch(app: &App, req: &Request) -> Result<Response, ApiError> {
-    let host = req.header("host").unwrap_or_default();
-    let local = ["127.0.0.1", "localhost"]
-        .iter()
-        .any(|h| host == *h || host.strip_prefix(h).is_some_and(|p| p.starts_with(':')));
-    if !local {
-        return Err(ApiError::new(403, "仅提供本机服务"));
+/// 地址与来源校验：默认只认本机；`TOWN_LAN=1` 时只认 `TOWN_LAN_HOSTS` 列出的 IP 或主机名。
+/// 网页的写操作要同源（x-town-client + JSON），这里再挡住跨站来源。见 docs/README.md 的局域网共享。
+pub(crate) fn check_authority(app: &App, req: &Request) -> Result<(), ApiError> {
+    let authority = req.header("host").unwrap_or_default();
+    let hostname = match authority.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => authority,
+    };
+    let hostname = hostname.trim_matches(['[', ']']).to_ascii_lowercase();
+    let allowed = if app.options.lan {
+        app.options.lan_hosts.iter().any(|h| *h == hostname)
+    } else {
+        matches!(hostname.as_str(), "127.0.0.1" | "localhost")
+    };
+    if !allowed || !authority.bytes().all(valid_authority_byte) {
+        return Err(ApiError::new(
+            403,
+            if app.options.lan {
+                "访问地址未获允许"
+            } else {
+                "仅提供本机服务"
+            },
+        ));
     }
+    if let Some(origin) = req.header("origin") {
+        let expected = format!("http://{authority}");
+        if origin != expected {
+            return Err(ApiError::new(403, "不允许跨站访问小镇"));
+        }
+    }
+    Ok(())
+}
+
+fn valid_authority_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+}
+
+fn dispatch(app: &App, req: &Request) -> Result<Response, ApiError> {
+    check_authority(app, req)?;
     if app.stopping() {
         return Err(ApiError::new(503, "应用正在退出"));
     }
@@ -176,7 +207,19 @@ fn api(app: &App, req: &Request, rest: &str, get: bool) -> Result<Response, ApiE
             app.refuse_displaced(id, automatic)?;
             app.make_room(id)?;
             let _serial = app.town_lock(id);
-            ok(app.hosts.open(&app.storage, id)?)
+            let mut entry = app.hosts.open(&app.storage, id)?;
+            // 经管理服务访问时用同源路径，页面照常走当前地址（本机或局域网）；世界进程仍只监听本机。
+            if let Some(session) = entry["endpoint"]
+                .as_str()
+                .and_then(|endpoint| endpoint.split_once("session="))
+                .map(|(_, session)| session.to_owned())
+            {
+                entry["endpoint"] = Value::from(format!(
+                    "ws://{}/api/towns/{id}/socket?session={session}",
+                    req.header("host").unwrap_or_default()
+                ));
+            }
+            ok(entry)
         }
         (false, "close") => {
             let lease = body(req)?["lease"].as_str().map(str::to_owned);

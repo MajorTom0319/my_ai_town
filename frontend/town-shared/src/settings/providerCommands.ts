@@ -1,6 +1,6 @@
 import type { ActiveModelChoice, ClientMsg, ProviderConfig, ProviderView } from '../protocol'
 import type { SaveCommand } from '../connection'
-import { providerRow } from '../providers.ts'
+import { providerRow } from '../providers'
 
 /** 一个服务商的待保存内容：密钥为空表示保持已存密钥 */
 export interface ProviderEdit {

@@ -1,6 +1,6 @@
 // 测试共用：仓库根目录、生成素材、Rust 校验入口、管理服务。不依赖 cwd。
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -23,6 +23,11 @@ export function townMap(document) {
     timeout: 60000,
     windowsHide: true,
   })
+}
+/** 本环境能跑 Rust 构建产物：文件在，且真的能起（缺 C 链接器时只能编译检查，不能跑测试）。 */
+export function rustBinaryAvailable(name) {
+  const path = binary(name)
+  return existsSync(path) && !!spawnSync(path, ['--help'], { encoding: 'utf8', windowsHide: true }).stdout
 }
 export function gate(document) {
   const r = townMap(document)
@@ -52,6 +57,8 @@ export async function startManager(
     lanHosts = [],
   } = {}
 ) {
+  if (!managerBinaryAvailable(managerBinary, hostBinary))
+    throw Error('需要先构建 target/debug/town-manager 与 host')
   await fs.mkdir(path.join(home, 'config'), { recursive: true })
   await fs
     .writeFile(path.join(home, 'config/credentials.json'), '{}', { flag: 'wx' })
@@ -107,6 +114,11 @@ export async function startManager(
       return exited
     },
   }
+}
+
+/** 当前环境能起 Rust 管理服务与世界进程（构建产物在，且有 C 链接器）。 */
+export function managerBinaryAvailable() {
+  return rustBinaryAvailable('host') && rustBinaryAvailable('town-manager')
 }
 
 /** 和建镇页一样：地图在这边生成，交 /drafts 由管理服务校验成草稿 */

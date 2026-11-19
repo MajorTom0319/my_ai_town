@@ -220,12 +220,17 @@ impl Hosts {
             .is_some_and(|r| r.lease == lease)
     }
 
-    fn endpoint(&self, id: &str) -> Option<String> {
+    /// 世界的地址和这次打开的凭证：网页经管理服务连世界时，管理服务照着它转发。
+    pub fn connection(&self, id: &str) -> Option<(String, String)> {
         self.running
             .lock()
             .unwrap()
             .get(id)
-            .map(|r| r.endpoint.clone())
+            .map(|r| (r.endpoint.clone(), r.lease.clone()))
+    }
+
+    fn endpoint(&self, id: &str) -> Option<String> {
+        self.connection(id).map(|(endpoint, _)| endpoint)
     }
 
     /// 仅「本次最终存档已确认」并且「正常退出」才算关闭成功。等待期间保留登记、stdin 和

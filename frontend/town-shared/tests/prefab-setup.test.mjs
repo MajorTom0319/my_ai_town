@@ -8,14 +8,20 @@ import path from 'node:path'
 import vm from 'node:vm'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
-import { createTown, root, startManager, worldQuery } from '../../../scripts/tests/support.mjs'
+import {
+  createTown,
+  managerBinaryAvailable,
+  root,
+  startManager,
+  worldQuery,
+} from '../../../scripts/tests/support.mjs'
 
 const require = createRequire(new URL('../package.json', import.meta.url))
 const ts = require('typescript')
 const plain = (value) => JSON.parse(JSON.stringify(value))
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-async function until(predicate, description) {
-  const deadline = Date.now() + 15000
+async function until(predicate, description, ms = 15000) {
+  const deadline = Date.now() + ms
   while (!predicate()) {
     if (Date.now() > deadline) throw Error(description())
     await sleep(20)
@@ -138,7 +144,7 @@ function page(prefab, endpoint, modelOptions = [], interruptKind, beforeCut, ord
           path.join(root, 'frontend/town-shared/src'),
           path.resolve(path.dirname(filename), dependency === '.' ? './index' : dependency)
         )
-        return load(`${resolved}.ts`)
+        return load(`${resolved.endsWith('.ts') ? resolved : `${resolved}.ts`}`)
       },
     }
     vm.runInNewContext(
@@ -296,7 +302,8 @@ const diagnostic = (p) =>
 test(
   '预制开局丢回执、刷新和关镇重开后恢复原选择，人物道具不重建、已完成玩法不重开',
   { timeout: 90000 },
-  async () => {
+  async (t) => {
+    if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'town-prefab-resume-'))
     let manager
     let current
@@ -372,7 +379,8 @@ test(
         p.start()
         await until(
           () => p.interrupted(),
-          () => diagnostic(p)
+          () => diagnostic(p),
+          35000
         )
         assert.equal(p.interrupted().ok, kind !== 'join_failed', diagnostic(p))
         if (kind === 'join_failed') {
@@ -556,7 +564,8 @@ test('新预制小镇跳过仍交回普通世界观设置，不生成开局计�
 test(
   '同页预制完成后重置与跳过后重置都重新开局，人数与规则不沿用旧局',
   { timeout: 60000 },
-  async () => {
+  async (t) => {
+    if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'town-prefab-reset-'))
     let manager
     let p

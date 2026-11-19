@@ -6,8 +6,9 @@ pub mod error;
 mod hosts;
 pub mod http;
 mod positions;
-mod routes;
+pub mod routes;
 pub mod storage;
+mod tunnel;
 mod ws;
 
 use error::ApiError;
@@ -37,11 +38,15 @@ pub struct Options {
     pub max_running: usize,
     pub mock_llm: bool,
     pub stop_on_stdin_close: bool,
+    /// 可信局域网共享（TOWN_LAN=1）：监听所有地址，只接受 `lan_hosts` 里的地址。
+    pub lan: bool,
+    /// 允许访问的主机名或 IP，逗号分隔，不带端口（TOWN_LAN_HOSTS）。
+    pub lan_hosts: Vec<String>,
 }
 
 const USAGE: &str = "town-manager --root <数据目录> --app <应用数据目录> --web <前端构建目录> \
 --host-bin <host> [--port 0] [--ready-file 路径] [--session-secret 口令] [--max-running 1] \
-[--mock-llm] [--stop-on-stdin-close]";
+[--lan-host 主机,可多给] [--mock-llm] [--stop-on-stdin-close]";
 
 impl Options {
     pub fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
@@ -52,7 +57,7 @@ impl Options {
             match arg.as_str() {
                 "--mock-llm" | "--stop-on-stdin-close" => flags.push(arg),
                 "--root" | "--app" | "--web" | "--host-bin" | "--port" | "--ready-file"
-                | "--session-secret" | "--max-running" => {
+                | "--session-secret" | "--max-running" | "--lan-host" => {
                     let value = it.next().ok_or_else(|| format!("{arg} 缺少参数值"))?;
                     values.insert(arg, value);
                 }
@@ -72,6 +77,23 @@ impl Options {
                 v.parse().map_err(|_| format!("{key} 的值无效：{v}"))
             })
         };
+        let lan_hosts: Vec<String> = values
+            .get("--lan-host")
+            .map(|list| {
+                list.split(',')
+                    .map(|h| h.trim().to_ascii_lowercase())
+                    .filter(|h| !h.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if values.contains_key("--lan-host")
+            && lan_hosts.iter().any(|h| {
+                !h.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+            })
+        {
+            return Err("--lan-host 只填 IP 或主机名，不带端口".into());
+        }
         Ok(Self {
             root: path("--root")?,
             app: path("--app")?,
@@ -86,6 +108,8 @@ impl Options {
             max_running: number("--max-running", 1)?.max(1),
             mock_llm: flags.iter().any(|f| f == "--mock-llm"),
             stop_on_stdin_close: flags.iter().any(|f| f == "--stop-on-stdin-close"),
+            lan: values.contains_key("--lan-host"),
+            lan_hosts,
         })
     }
 }
@@ -109,6 +133,12 @@ pub struct App {
 impl App {
     fn stopping(&self) -> bool {
         host::process::stopping()
+    }
+
+    /// 页面的世界连接经这里转发到本机世界：连接口令必须是这个小镇最近一次打开的凭证。
+    fn world_connection(&self, id: &str, session: &str) -> Option<String> {
+        let (endpoint, lease) = self.hosts.connection(id)?;
+        (lease == session).then_some(endpoint)
     }
 
     /// 要进的小镇没在运行、而同时运行的小镇已经跑满：先保存并关掉最久没人进过的，腾出位置。
@@ -217,11 +247,13 @@ fn acquire_lock(root: &std::path::Path, app: &std::path::Path) -> Result<PathBuf
     Ok(lock)
 }
 
-fn bind(port: u16) -> Result<TcpListener, String> {
+/// 本机只监听回环；局域网共享时监听所有地址，由地址校验决定谁能访问。
+fn bind(port: u16, lan: bool) -> Result<TcpListener, String> {
     let tries = if port == 0 { 1 } else { 10 };
     let mut last = String::new();
+    let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
     for offset in 0..tries {
-        match TcpListener::bind(("127.0.0.1", port.saturating_add(offset))) {
+        match TcpListener::bind((host, port.saturating_add(offset))) {
             Ok(listener) => return Ok(listener),
             Err(e) => last = e.to_string(),
         }
@@ -247,7 +279,7 @@ fn serve(options: Options, storage: Storage) -> Result<(), String> {
         options.max_running,
         options.mock_llm,
     );
-    let listener = bind(options.port)?;
+    let listener = bind(options.port, options.lan)?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     if let Some(ready) = &options.ready_file {
@@ -256,9 +288,16 @@ fn serve(options: Options, storage: Storage) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     println!(
-        "[town-manager] http://127.0.0.1:{port} · {}",
+        "[town-manager] http://{}:{port} · {}",
+        if options.lan { "0.0.0.0" } else { "127.0.0.1" },
         options.root.display()
     );
+    if options.lan {
+        println!(
+            "[town-manager] 局域网共享管理权限 · 允许地址：{}",
+            options.lan_hosts.join(", ")
+        );
+    }
     let app = Arc::new(App {
         options,
         storage,
@@ -315,6 +354,12 @@ fn connection(app: &App, mut stream: TcpStream) {
             return;
         }
     };
+    if tunnel::wants(&request) {
+        if let Err(e) = tunnel::forward(app, stream, &request) {
+            eprintln!("[town-manager] 世界连接：{}", e.message);
+        }
+        return;
+    }
     let response = routes::handle(app, &request);
     let _ = http::write_response(&mut stream, &response, request.method == "HEAD");
 }

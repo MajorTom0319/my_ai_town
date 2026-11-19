@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { APPEARANCE_SET } from '../mapgen/budget.mjs'
 import { walkingHarness } from './avatar-input-support.mjs'
-import { createTown, startManager } from './support.mjs'
+import { createTown, managerBinaryAvailable, startManager } from './support.mjs'
 
 test('rotated view maps WASD and stick input to world directions while click routes stay in world space', () => {
   const sent = []
@@ -60,7 +60,8 @@ test('rotated view maps WASD and stick input to world directions while click rou
   }
 })
 
-test('actual WASD input adapter drives a generated world and saves its stopped position', async () => {
+test('actual WASD input adapter drives a generated world and saves its stopped position', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-avatar-runtime-'))
   const m = await startManager(root)
   let ws, input

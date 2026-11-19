@@ -5,10 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { registerHooks } from 'node:module'
 import { APPEARANCE_SET } from '../mapgen/budget.mjs'
-import { createTown, startManager, worldQuery } from './support.mjs'
+import { createTown, managerBinaryAvailable, startManager, worldQuery } from './support.mjs'
 import { position } from '../../frontend/town-shared/src/spatial.ts'
 
-test('survival10 personas, worldview and furnishings survive opening, reload and reset', async () => {
+test('survival10 personas, worldview and furnishings survive opening, reload and reset', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const hooks = registerHooks({
     resolve(specifier, context, nextResolve) {
       if (context.parentURL?.includes('/src/prefabs/') && specifier.startsWith('.'))
@@ -161,7 +162,8 @@ test('survival10 personas, worldview and furnishings survive opening, reload and
   }
 })
 
-test('residents at runtime prop stations remain visible and possessable after removal and reload', async () => {
+test('residents at runtime prop stations remain visible and possessable after removal and reload', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-runtime-station-'))
   let m
   try {
@@ -275,7 +277,8 @@ test('residents at runtime prop stations remain visible and possessable after re
   }
 })
 
-test('one world commits dynamic book geometry and removals together across restart', async () => {
+test('one world commits dynamic book geometry and removals together across restart', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-space-runtime-'))
   let m
   try {
@@ -388,7 +391,8 @@ async function startTown(root, places, extra = {}) {
 
 // 环岛南边的地点，入口开在朝岛心的北边：操作锚点一律放南边时，从入口走过去都要穿过道具本身，
 // 放一两件就满了。锚点可以换到北边，同一处地点能接连放下多件。
-test('a place entered from the north still takes several props', async () => {
+test('a place entered from the north still takes several props', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-space-north-'))
   let m
   try {
@@ -429,7 +433,8 @@ test('a place entered from the north still takes several props', async () => {
   }
 })
 
-test('placing a prop where the player clicked puts it beside that spot', async () => {
+test('placing a prop where the player clicked puts it beside that spot', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-space-near-'))
   let m
   try {

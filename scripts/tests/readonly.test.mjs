@@ -7,8 +7,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { stageAppBundle } from '../app-bundle.mjs'
-import { draftTown, startManager } from './support.mjs'
-test('built app creates and runs a map with a read-only resource tree and no preconfigured map files', async () => {
+import { draftTown, managerBinaryAvailable, startManager } from './support.mjs'
+test('built app creates and runs a map with a read-only resource tree and no preconfigured map files', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'town-readonly-')),
     bundle = path.join(temp, 'application'),
     data = path.join(temp, 'user-data')

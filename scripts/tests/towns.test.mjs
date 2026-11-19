@@ -7,7 +7,14 @@ import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
 import { seal } from '../mapgen/document.mjs'
-import { createTown, draftTown, root as source, startManager, worldQuery } from './support.mjs'
+import {
+  createTown,
+  draftTown,
+  managerBinaryAvailable,
+  root as source,
+  startManager,
+  worldQuery,
+} from './support.mjs'
 const BUILTIN_TOWNS = ['default-town', 'spring-valley', 'broken-towers']
 const spec = {
   name: '隔离地图',
@@ -29,7 +36,8 @@ const alive = (pid) => {
     return false
   }
 }
-test('saved towns open in isolated worlds, come back after a restart, and are deleted only with their world closed', async () => {
+test('saved towns open in isolated worlds, come back after a restart, and are deleted only with their world closed', async (t) => {
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-manager-test-'))
   let m
   try {
@@ -251,8 +259,7 @@ test('saved towns open in isolated worlds, come back after a restart, and are de
 })
 
 test('LAN sharing is opt-in and checks the authority and origin for both API and world upgrades', async (t) => {
-  if (!process.env.TOWN_MANAGER_BINARY)
-    return t.skip('需要先构建 target/debug/town-manager 与 host')
+  if (!managerBinaryAvailable()) return t.skip('需要先构建 target/debug/town-manager 与 host')
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-lan-test-'))
   const hostname =
     Object.values(os.networkInterfaces())

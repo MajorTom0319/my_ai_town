@@ -36,7 +36,7 @@ import type { Receipt, SaveCommand } from '../connection'
 import type { ShellPanel } from '../shell/panel'
 import type { SpeedBar } from '../shell/topbar'
 import { DEFAULT_WORLDVIEW, townEntryHint, type createWorldSettings } from '../worldSettings'
-import { providerSaveCommand } from '../settings/providerCommands.ts'
+import { providerSaveCommand } from '../settings/providerCommands'
 
 const DONE_KEY = 'town:guide-done'
 /** 第二步列出的服务（和连接模型的弹层同一份）；其余的在设定的「模型服务」里 */
