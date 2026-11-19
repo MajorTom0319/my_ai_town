@@ -118,22 +118,23 @@ pub fn config_path() -> String {
     std::env::var("AI_TOWN_CONFIG").unwrap_or_else(|_| CONFIG_PATH.into())
 }
 
-/// AI_TOWN_HOME：运行数据根目录（存档、村民库、道具库）。未设置时按平台惯例放在用户数据目录，
-/// 不放进仓库，也不与调用日志混用。
+/// AI_TOWN_HOME：运行数据根目录（存档、村民库、道具库）。本工作区未设置时用仓库根的
+/// `.local/town-data`；路径随可执行文件的位置定位，单独运行 host 也不会读写用户目录。
 pub fn data_root() -> Result<PathBuf, HostError> {
     if let Some(root) = std::env::var_os("AI_TOWN_HOME").filter(|s| !s.is_empty()) {
         return Ok(PathBuf::from(root));
     }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| HostError::Config("缺少 HOME；请指定 --save-file 或 AI_TOWN_HOME".into()))?;
-    Ok(if cfg!(target_os = "macos") {
-        PathBuf::from(home).join("Library/Application Support/MyAiTown/town-2d")
-    } else {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(home).join(".local/share"))
-            .join("my-ai-town/town-2d")
-    })
+    Ok(workspace_root()?.join(".local/town-data"))
+}
+
+/// 二进制在 `target/<profile>/` 下；回到仓库根。搬走的安装包由启动器显式给 AI_TOWN_HOME。
+fn workspace_root() -> Result<PathBuf, HostError> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent()?.parent()?.parent().map(PathBuf::from))
+        .ok_or_else(|| {
+            HostError::Config("找不到工作区根目录；请指定 --save-file 或 AI_TOWN_HOME".into())
+        })
 }
 
 /// AI_TOWN_LOG_DIR：Agent 轨迹日志目录，缺省为当前目录下的 logs/。

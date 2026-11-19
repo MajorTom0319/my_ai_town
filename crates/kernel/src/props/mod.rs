@@ -24,6 +24,29 @@ pub const MAX_STACK: u32 = 5;
 pub const MAX_NESTING: usize = 3;
 pub const MAX_STORAGE_SLOTS: u32 = 80;
 
+#[derive(Debug, Clone, Copy)]
+pub enum SupplyAdjustment {
+    Set(u32),
+    Add(u32),
+    Subtract(u32),
+    Halve,
+}
+
+impl SupplyAdjustment {
+    pub fn apply(self, remaining: u32) -> Result<u32> {
+        match self {
+            Self::Set(quantity) => Ok(quantity),
+            Self::Add(quantity) => remaining
+                .checked_add(quantity)
+                .ok_or_else(|| KernelError::action("库存数量溢出")),
+            Self::Subtract(quantity) => remaining
+                .checked_sub(quantity)
+                .ok_or_else(|| KernelError::action("扣减数量超过当前库存")),
+            Self::Halve => Ok(remaining / 2),
+        }
+    }
+}
+
 /// 叠放上限与容器格数在允许范围内。道具定义和地图里的旧格式道具共用。
 pub(crate) fn stack_and_slots_valid(stack_limit: u32, storage_slots: u32) -> bool {
     (1..=MAX_STACK).contains(&stack_limit) && storage_slots <= MAX_STORAGE_SLOTS
@@ -116,6 +139,9 @@ pub struct Action {
     pub recipient: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rest: bool,
+    /// 允许多人同时使用同一操作位，由动作本身或玩法在完成时分辨结果。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub concurrent: bool,
     #[serde(default)]
     pub completion: Completion,
     #[serde(default)]

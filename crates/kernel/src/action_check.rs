@@ -209,9 +209,12 @@ pub(crate) fn check_start_conditions(w: &World, actor: &str, spot: &Spot) -> Res
     };
     let shared = reads_notice(spot.action.as_ref());
     ensure!(
-        w.prop_occupants(&spot.prop)
-            .iter()
-            .all(|o| o == actor || (shared && reading_too(o))),
+        (shared
+            && w.prop_occupants(&spot.prop)
+                .iter()
+                .all(|o| o == actor || reading_too(o)))
+            || spot.action.as_ref().is_some_and(|action| action.concurrent)
+            || w.prop_occupants(&spot.prop).iter().all(|o| o == actor),
         KernelError::action("道具正被其他村民使用")
     );
     Ok(())

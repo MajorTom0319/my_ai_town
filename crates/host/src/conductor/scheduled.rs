@@ -79,7 +79,7 @@ impl Runtime {
             Some(Value::String(tool)) if allowed(tool) => tool.clone(),
             _ => {
                 return Err(reject(
-                    "预约只能执行通知、天气、投放或移除道具、张贴公告，不能预约查看或再次预约",
+                    "预约只能执行通知、天气、投放或移除道具、张贴公告、调整库存，不能预约查看或再次预约",
                 ))
             }
         };
@@ -160,6 +160,8 @@ impl Runtime {
             .position(|task| !task.at.is_finite() || task.at <= self.world.minutes())
         {
             let task = self.director.state.scheduled[index].clone();
+            // 事务里执行可能推进模拟时间；日志属于执行的那一刻，先把它从世界队列拿出来单独交出去。
+            let before = self.world.take_events();
             let player = format!("预约执行 · {}：{}", self.world.clock(), task.text);
             let result = self.transact(|runtime| {
                 runtime.director.state.scheduled.remove(index);
@@ -190,12 +192,19 @@ impl Runtime {
                 runtime.director.remember(entry.clone());
                 Ok(entry)
             });
+            // 预约通知在事务以外另行发出；事务撤回时，这个动作产生的日志不入剧本。
+            let mut events = vec![before];
             let entry = match result {
                 Ok(entry) => {
                     self.director_props_changed |= matches!(
                         task.tool.as_str(),
-                        "place_prop" | "remove_prop" | "post_bulletin"
+                        "place_prop"
+                            | "remove_prop"
+                            | "post_bulletin"
+                            | "adjust_supply"
+                            | "trigger_game_event"
                     );
+                    events.push(self.world.take_events());
                     entry
                 }
                 Err(aborted) => match aborted.cause {
@@ -218,10 +227,13 @@ impl Runtime {
                         {
                             break;
                         }
+                        // 撤回后世界日志回到事务前；改道的通知本身仍是真实发生的。
+                        events.push(self.world.take_events());
                         entry
                     }
                 },
             };
+            self.director_events.extend(events.into_iter().flatten());
             self.director_outbox.push(entry);
         }
     }
@@ -230,7 +242,13 @@ impl Runtime {
 fn allowed(tool: &str) -> bool {
     matches!(
         tool,
-        "announce" | "set_weather" | "place_prop" | "remove_prop" | "post_bulletin"
+        "announce"
+            | "set_weather"
+            | "place_prop"
+            | "remove_prop"
+            | "post_bulletin"
+            | "adjust_supply"
+            | "trigger_game_event"
     )
 }
 
@@ -244,6 +262,8 @@ fn validate(tool: &str, arguments: &Value) -> Result<(), &'static str> {
         "place_prop" => &["definition", "locale"],
         "remove_prop" => &["id"],
         "post_bulletin" => &["locale", "board", "title", "text"],
+        "adjust_supply" => &["id", "operation", "reason"],
+        "trigger_game_event" => &["kind"],
         _ => return Err("不支持的预约操作"),
     };
     if required.iter().any(|key| {
@@ -261,6 +281,13 @@ fn validate(tool: &str, arguments: &Value) -> Result<(), &'static str> {
                     .is_ok() => {}
             _ => return Err("天气预约须指定 natural，或 fixed 加有效的 kind"),
         }
+    }
+    if tool == "adjust_supply" {
+        super::tools::supply_adjustment(arguments)?;
+    }
+    if tool == "trigger_game_event" {
+        serde_json::from_value::<protocol::GameModeEvent>(arguments.clone())
+            .map_err(|_| "天灾参数无效，须指定玩法事件类型及事件参数")?;
     }
     Ok(())
 }

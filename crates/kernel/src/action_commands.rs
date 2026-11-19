@@ -171,8 +171,22 @@ impl World {
     ) -> Option<ThoughtView> {
         let now = self.minutes;
         let a = self.actors.get_mut(actor_id)?;
-        a.journal.note_decision(text, now, info, voiced)?;
-        a.journal.view()
+        let thought = a.journal.note_decision(text, now, info, voiced)?;
+        let fact = crate::world::ManuscriptFact {
+            kind: protocol::ManuscriptKind::Thought,
+            visibility: protocol::ManuscriptVisibility::Private,
+            tone: protocol::ManuscriptTone::Thought,
+            actor: Some(actor_id.into()),
+            name: Some(a.name.clone()),
+            locale: Some(a.locus.locale.clone()),
+            text: thought.text.clone(),
+            about: vec![actor_id.into()],
+            source: format!("thought:{actor_id}:{}", thought.at),
+            at: now,
+        };
+        let view = a.journal.view();
+        self.manuscript(fact);
+        view
     }
 }
 

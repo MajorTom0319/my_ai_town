@@ -16,15 +16,38 @@ use crate::actor::Actor;
 use crate::error::{KernelError, Result};
 use crate::physiology::{Rates, Trace};
 use crate::World;
-use protocol::{GameModeAction, GameModeChoice, GameModeContext, GameModeView};
+use protocol::{GameModeAction, GameModeChoice, GameModeContext, GameModeEvent, GameModeView};
 use serde::{Deserialize, Serialize};
 
 /// 玩法接进本体的几处。玩法自己的状态在实现者里；本体的东西只通过 `world` 读写。
 trait Rules {
+    fn director_event(&mut self, _world: &mut World, _event: &GameModeEvent) -> Result<String> {
+        Err(KernelError::action("当前玩法不支持此导演事件"))
+    }
     /// 存档、设定里认它的名字
     const ID: &'static str;
     /// 离下一个要停下来结算的时刻还有多久（分钟）；没有就是无穷大
     fn boundary(&self, world: &World) -> f64;
+    /// 存档装回玩法后修整旧档遗留的运行状态。新局在 `open` 里处理过的事情不在这里重复补发；
+    /// 默认什么也不做，只有玩法格式确实迁移过的才实现。
+    fn restore(&mut self, _world: &mut World) {}
+    fn required_action(&self, _world: &World, _actor: &str) -> Option<String> {
+        None
+    }
+    fn offstage_action(&self, _actor: &str) -> bool {
+        false
+    }
+    fn allows_decision(&self, _actor: &str) -> bool {
+        true
+    }
+    /// 这个人此刻能否交谈。玩法可以禁止正在执行关键工作的人借普通交谈中断行动；
+    /// 没有玩的规则时始终允许。
+    fn allows_chat(&self, _world: &World, _actor: &str) -> bool {
+        true
+    }
+    fn speech(&self, _actor: &str) -> Option<protocol::SpeechView> {
+        None
+    }
     /// 推进到 `world.minutes()` 时结算：发公告、记日志
     fn advance(&mut self, world: &mut World);
     /// 这个人身上额外的消耗；trace 收集给观察仪和模型看的说明
@@ -68,6 +91,11 @@ trait Rules {
     ) -> Result<Option<f64>> {
         Ok(None)
     }
+    /// 启动动作被拒绝或撞车后，需要在拿到可写世界时中断那些已经在进行中的动作。
+    /// 返回的人物只在本玩法自己的动作结算里产生；默认没有。
+    fn interrupt_after_start(&mut self, _world: &mut World) {}
+    /// 完成动作后发现行动撞车：同样等世界可写时再中断还在进行中的其他人，本人只走通用失败路径。
+    fn interrupt_after_complete(&mut self, _world: &mut World) {}
     fn complete_prop_action(
         &mut self,
         _world: &mut World,
@@ -76,6 +104,27 @@ trait Rules {
     ) -> Result<Option<Vec<String>>> {
         Ok(None)
     }
+    fn adjust_supply(
+        &mut self,
+        _world: &mut World,
+        _prop: &str,
+        _action: &str,
+        _adjustment: crate::props::SupplyAdjustment,
+        _reason: &str,
+    ) -> Result<Option<(u32, u32)>> {
+        Ok(None)
+    }
+    /// 本局已经稳定结束，不再随时间或动作发展。终局后世界停表，不能再把剩下的时间走成新的一天。
+    fn ended(&self, _world: &World) -> bool {
+        false
+    }
+    /// 本拍跨过了不止一个玩法截止（例如入夜时既有集合截止，也有夜间截止）。
+    /// 下一次 `step` 不用再为空跑一整段世界时间。
+    fn settled(&self, _world: &World) -> bool {
+        false
+    }
+    /// 一片真实世界时间走了多久；累计有效劳动时只看时间，不看这一刻模型是否碰巧在停钟。
+    fn track_interval(&mut self, _world: &World, _from: f64, _to: f64) {}
     /// 有人对人动了手（推搡、抢、偷、搜身、拿道具伤人），text 是一句写好的经过，
     /// 比如「骆川用鱼叉刺白鸦，健康 −40」；玩法可以记进自己的战报。
     fn clash(&mut self, _world: &World, _actor: &str, _target: &str, _text: &str) {}
@@ -171,10 +220,30 @@ impl World {
         Ok(())
     }
 
+    pub(crate) fn game_mode_ended(&self) -> bool {
+        self.game_mode
+            .as_ref()
+            .is_some_and(|g| each!(g, m => m.ended(self)))
+    }
+
+    pub(crate) fn game_mode_settled(&self) -> bool {
+        self.game_mode
+            .as_ref()
+            .is_some_and(|g| each!(g, m => m.settled(self)))
+    }
+
     pub(crate) fn game_mode_boundary(&self) -> f64 {
         self.game_mode
             .as_ref()
             .map_or(f64::INFINITY, |g| each!(g, m => m.boundary(self)))
+    }
+
+    /// 读档装好玩法之后调一次，让玩法修正旧档的动作定义和派生状态。
+    pub(crate) fn restore_game_mode(&mut self) {
+        if let Some(mut mode) = self.game_mode.take() {
+            each!(&mut mode, rules => rules.restore(self));
+            self.game_mode = Some(mode);
+        }
     }
 
     /// 结算时先把玩法从世界里拿出来，免得它一边读写世界一边改自己。
@@ -192,14 +261,58 @@ impl World {
         }
     }
 
+    pub(crate) fn game_mode_track_interval(&mut self, from: f64, to: f64) {
+        if let Some(mut mode) = self.game_mode.take() {
+            each!(&mut mode, rules => rules.track_interval(self, from, to));
+            self.game_mode = Some(mode);
+        }
+    }
+
     pub fn game_mode_view(&self) -> Option<GameModeView> {
         self.game_mode.as_ref().map(|g| each!(g, m => m.view(self)))
+    }
+
+    pub fn game_mode_required_action(&self, actor: &str) -> Option<String> {
+        self.game_mode
+            .as_ref()
+            .and_then(|g| each!(g, m => m.required_action(self, actor)))
+    }
+    pub fn game_mode_offstage_action(&self, actor: &str) -> bool {
+        self.game_mode
+            .as_ref()
+            .is_some_and(|mode| each!(mode, rules => rules.offstage_action(actor)))
+    }
+    pub fn game_mode_allows_decision(&self, actor: &str) -> bool {
+        self.game_mode
+            .as_ref()
+            .is_none_or(|mode| each!(mode, rules => rules.allows_decision(actor)))
+    }
+
+    pub fn game_mode_allows_chat(&self, actor: &str) -> bool {
+        self.game_mode
+            .as_ref()
+            .is_none_or(|mode| each!(mode, rules => rules.allows_chat(self, actor)))
+    }
+
+    pub(crate) fn game_mode_speech(&self, actor: &str) -> Option<protocol::SpeechView> {
+        self.game_mode
+            .as_ref()
+            .and_then(|g| each!(g, m => m.speech(actor)))
     }
 
     pub fn game_mode_context(&self, actor: &str) -> Option<GameModeContext> {
         self.game_mode
             .as_ref()
             .and_then(|g| each!(g, m => m.context(self, actor)))
+    }
+
+    pub fn director_game_event(&mut self, event: &GameModeEvent) -> Result<String> {
+        let Some(mut mode) = self.game_mode.take() else {
+            return Err(KernelError::action("请先开启支持此事件的玩法"));
+        };
+        let result = each!(&mut mode, rules => rules.director_event(self, event));
+        self.game_mode = Some(mode);
+        result
     }
 
     /// 玩法要的速度倍数；没开玩法时是 1
@@ -247,6 +360,9 @@ impl World {
             return Ok(None);
         };
         let result = each!(&mut mode, rules => rules.start_prop_action(self, actor, spot));
+        if result.is_err() || result.as_ref().is_ok_and(Option::is_none) {
+            each!(&mut mode, rules => rules.interrupt_after_start(self));
+        }
         self.game_mode = Some(mode);
         result
     }
@@ -260,6 +376,25 @@ impl World {
             return Ok(None);
         };
         let result = each!(&mut mode, rules => rules.complete_prop_action(self, actor, spot));
+        if result.is_err() || result.as_ref().is_ok_and(Option::is_none) {
+            each!(&mut mode, rules => rules.interrupt_after_complete(self));
+        }
+        self.game_mode = Some(mode);
+        result
+    }
+
+    pub(crate) fn game_mode_adjust_supply(
+        &mut self,
+        prop: &str,
+        action: &str,
+        adjustment: crate::props::SupplyAdjustment,
+        reason: &str,
+    ) -> Result<Option<(u32, u32)>> {
+        let Some(mut mode) = self.game_mode.take() else {
+            return Ok(None);
+        };
+        let result =
+            each!(&mut mode, rules => rules.adjust_supply(self, prop, action, adjustment, reason));
         self.game_mode = Some(mode);
         result
     }

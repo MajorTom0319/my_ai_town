@@ -16,6 +16,7 @@ use std::{
 
 mod context;
 mod prompt;
+mod query;
 mod scheduled;
 mod tools;
 
@@ -30,7 +31,7 @@ const REPLY_MAX_CHARS: usize = 1200;
 /// 固定回复模式下「想」多久：让轮次状态能被看见。
 const MOCK_DELAY: Duration = Duration::from_millis(300);
 /// 只调用工具却没回答时，最多再请模型补几次正文。
-const FOLLOW_UP_MAX: u8 = 4;
+const FOLLOW_UP_MAX: u8 = 12;
 
 /// 发给工作线程的一轮：题面在主机线程拼好，工作线程只发 HTTP。
 pub(crate) struct Work {
@@ -64,6 +65,7 @@ pub(crate) struct Director {
     /// 最近一轮里每条工具的结果；`director_apply` 写完，轮次结尾取走。
     effects: Vec<DirectorEffect>,
     published_pending: Vec<DirectorPending>,
+    query_snapshot: Option<serde_json::Value>,
 }
 
 impl Director {
@@ -76,6 +78,7 @@ impl Director {
             results,
             effects: Vec::new(),
             published_pending: Vec::new(),
+            query_snapshot: None,
         }
     }
 
@@ -105,6 +108,7 @@ impl Director {
             };
             self.in_flight = None;
             self.effects.clear();
+            self.query_snapshot = None;
         }
     }
 
@@ -173,6 +177,7 @@ impl Runtime {
             target
         };
         let round = self.director.state.next_round + 1;
+        self.director.query_snapshot = None;
         let body = prompt::request_body(self, &text, target.model.clone());
         self.director.state.next_round = round;
         let work = Work {
@@ -334,6 +339,7 @@ impl Runtime {
         effects: Vec<DirectorEffect>,
         error: Option<String>,
     ) {
+        self.director.query_snapshot = None;
         let entry = DirectorEntry {
             world_id: flight.world_id,
             player: flight.player,
@@ -412,9 +418,8 @@ impl Runtime {
     /// 世界日志到了：留下最近几条给导演下一轮看。
     pub(crate) fn note_director_event(&mut self, event: &kernel::Event) {
         let kernel::Event::Log { minutes, text, .. } = event;
-        self.director_recent
-            .push_back((kernel::clock_string(*minutes), text.clone()));
-        while self.director_recent.len() > 40 {
+        self.director_recent.push_back((*minutes, text.clone()));
+        while self.director_recent.len() > 2000 {
             self.director_recent.pop_front();
         }
     }
@@ -449,7 +454,14 @@ fn submit(
 fn is_read(name: &str) -> bool {
     matches!(
         name,
-        "look" | "survey" | "watch" | "inspect" | "read_content" | "trace" | "history"
+        "look"
+            | "survey"
+            | "watch"
+            | "inspect"
+            | "read_content"
+            | "trace"
+            | "history"
+            | "query_data"
     )
 }
 

@@ -183,6 +183,13 @@ impl Affordances {
         self.spots.get(&(locale.to_string(), verb.to_string()))
     }
 
+    /// 同一操作位允许多人同时开始的动作。玩法可能只在完成时统一裁定谁成功，
+    /// 不能让通用占用检查先替它决定先后（例如十日生存的同目标偷粮撞车）。
+    pub fn concurrent(&self, prop: &str, verb: &str) -> bool {
+        self.action(Some(prop), "", verb)
+            .is_some_and(|action| action.concurrent)
+    }
+
     /// 指定道具时按道具查，否则按处所查。
     pub fn lookup(&self, prop: Option<&str>, locale: &str, verb: &str) -> Option<&Spot> {
         match prop {

@@ -292,7 +292,7 @@ impl Runtime {
             .with_resident(Some(resident), |rt, id| rt.world.adjust_body(id, values))
             .and_then(|adjusted| adjusted.map_err(HostError::from));
         let events = self.world.take_events();
-        self.driver.dispatch(&self.world, events, clients);
+        self.dispatch_world_events(events, clients);
         match result {
             Ok(text) => Outcome::reply(agent_saved(request_id, Ok(()), &text))
                 .and_all(self.roster())

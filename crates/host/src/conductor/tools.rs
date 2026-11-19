@@ -28,6 +28,8 @@ impl Runtime {
                         | "remove_prop"
                         | "post_bulletin"
                         | "set_weather"
+                        | "adjust_supply"
+                        | "trigger_game_event"
                 )
             })
             .then(|| self.begin_change());
@@ -43,7 +45,8 @@ impl Runtime {
                 continue;
             }
             match call.name.as_str() {
-                "look" | "survey" | "watch" | "inspect" | "read_content" | "trace" | "history" => {
+                "look" | "survey" | "watch" | "inspect" | "read_content" | "trace" | "history"
+                | "query_data" => {
                     let effect = match self.director_read(&call.name, &call.arguments) {
                         Ok(effect) => effect,
                         Err(effect) => effect,
@@ -58,7 +61,7 @@ impl Runtime {
                     }
                 },
                 "announce" | "schedule" | "place_prop" | "remove_prop" | "post_bulletin"
-                | "set_weather" => {
+                | "set_weather" | "adjust_supply" | "trigger_game_event" => {
                     if changes == CALLS_PER_ROUND {
                         rolled_back = true;
                         effects.push(failed(
@@ -95,7 +98,11 @@ impl Runtime {
             let edits_catalog = reply.calls.iter().any(|c| {
                 matches!(
                     c.name.as_str(),
-                    "place_prop" | "remove_prop" | "post_bulletin"
+                    "place_prop"
+                        | "remove_prop"
+                        | "post_bulletin"
+                        | "adjust_supply"
+                        | "trigger_game_event"
                 )
             });
             if rolled_back {
@@ -123,8 +130,13 @@ impl Runtime {
     }
 
     /// 读工具的事实只进入本轮的题面和给玩家的回答，不写存档。
-    fn director_read(&self, name: &str, args: &Value) -> Result<DirectorEffect, DirectorEffect> {
+    fn director_read(
+        &mut self,
+        name: &str,
+        args: &Value,
+    ) -> Result<DirectorEffect, DirectorEffect> {
         let text = match name {
+            "query_data" => crate::conductor::query::read(self, args)?,
             "look" => crate::conductor::context::world_view(self),
             "survey" => crate::conductor::context::survey(self),
             "watch" => crate::conductor::context::watch(self, args),
@@ -144,6 +156,28 @@ impl Runtime {
     ) -> Result<DirectorEffect, DirectorEffect> {
         let ok = |text: String| Ok(done(name, text));
         match name {
+            "trigger_game_event" => {
+                let event = serde_json::from_value::<protocol::GameModeEvent>(args.clone())
+                    .map_err(|error| bad(&format!("玩法事件参数无效：{error}")))?;
+                let text = self
+                    .world
+                    .director_game_event(&event)
+                    .map_err(|error| kernel_error(name, error))?;
+                ok(text)
+            }
+            "adjust_supply" => {
+                let id = text_arg(args, "id")?;
+                let action = optional_arg(args, "action");
+                let reason = text_arg(args, "reason")?;
+                let adjustment = supply_adjustment(args).map_err(bad)?;
+                let (action, before, after) = self
+                    .world
+                    .director_adjust_supply(&id, action.as_deref(), adjustment, &reason)
+                    .map_err(|error| kernel_error(name, error))?;
+                ok(format!(
+                    "已调整 {id}/{action} 库存：{before}→{after}；原因：{reason}"
+                ))
+            }
             "announce" => {
                 let text = text_arg(args, "text")?;
                 let locale = optional_arg(args, "locale");
@@ -277,6 +311,31 @@ impl Runtime {
             }
             n += 1;
         }
+    }
+}
+
+pub(super) fn supply_adjustment(
+    args: &Value,
+) -> Result<kernel::props::SupplyAdjustment, &'static str> {
+    use kernel::props::SupplyAdjustment;
+    if args["operation"].as_str() == Some("halve") {
+        if args
+            .get("quantity")
+            .is_some_and(|quantity| !quantity.is_null())
+        {
+            return Err("halve 不接受 quantity，减半按执行时库存向下取整");
+        }
+        return Ok(SupplyAdjustment::Halve);
+    }
+    let quantity = args["quantity"]
+        .as_u64()
+        .and_then(|quantity| u32::try_from(quantity).ok())
+        .ok_or("库存 quantity 必须是非负整数，且不超过32位整数范围")?;
+    match args["operation"].as_str() {
+        Some("set") => Ok(SupplyAdjustment::Set(quantity)),
+        Some("add") => Ok(SupplyAdjustment::Add(quantity)),
+        Some("subtract") => Ok(SupplyAdjustment::Subtract(quantity)),
+        _ => Err("operation 只能是 set、add、subtract 或 halve"),
     }
 }
 

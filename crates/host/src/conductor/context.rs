@@ -20,6 +20,20 @@ const WATCH_ENTRIES: usize = 60;
 pub(crate) fn world_view(runtime: &Runtime) -> String {
     let world = &runtime.world;
     let mut out = String::new();
+    if let Some(protocol::GameModeView::Survival10(view)) = world.game_mode_view() {
+        let _ = writeln!(
+            out,
+            "当前玩法：聪明人小镇，第{}天，阶段{:?}；天灾工具可用（须有公告栏且未终局）。",
+            view.day, view.phase
+        );
+        for notice in view.disasters.iter().rev().take(10) {
+            let _ = writeln!(out, "赛事天灾公告：{}", notice.text);
+        }
+    }
+    let _ = writeln!(
+        out,
+        "以下为有限摘要；完整数据与未列出的对象请用 query_data 查询，先用空 path 查看目录。"
+    );
     let _ = writeln!(
         out,
         "时钟：{}，绝对模拟分钟 {}，节奏 {}{}",
@@ -118,6 +132,23 @@ pub(crate) fn world_view(runtime: &Runtime) -> String {
             p.name,
             world.topo.locale_name(&p.locale)
         );
+        if let Some(prop) = world.topo.prop(&p.id) {
+            for action in prop.verbs.iter().filter_map(|verb| verb.action.as_ref()) {
+                if let Some(remaining) = world.props().supply_remaining(&p.id, action) {
+                    let _ = writeln!(
+                        out,
+                        "  库存动作 {}：{}{}",
+                        action.id,
+                        remaining,
+                        if action.mode_managed {
+                            "（玩法账本）"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+        }
     }
     if props.is_empty() {
         let _ = writeln!(out, "（没有）");
@@ -157,14 +188,14 @@ pub(crate) fn world_view(runtime: &Runtime) -> String {
 
     if !runtime.director_recent.is_empty() {
         let _ = writeln!(out, "\n最近发生：");
-        for (clock, text) in runtime
+        for (at, text) in runtime
             .director_recent
             .iter()
             .rev()
             .take(RECENT_EVENTS)
             .rev()
         {
-            let _ = writeln!(out, "- {clock} {text}");
+            let _ = writeln!(out, "- {} {text}", kernel::clock_string(*at));
         }
     }
     out
@@ -211,8 +242,8 @@ pub(crate) fn survey(runtime: &Runtime) -> String {
     }
     if !runtime.director_recent.is_empty() {
         let _ = writeln!(out, "最近的世界动静：");
-        for (clock, text) in runtime.director_recent.iter().rev().take(12).rev() {
-            let _ = writeln!(out, "- {clock} {text}");
+        for (at, text) in runtime.director_recent.iter().rev().take(12).rev() {
+            let _ = writeln!(out, "- {} {text}", kernel::clock_string(*at));
         }
     }
     out
@@ -261,6 +292,43 @@ pub(crate) fn inspect(runtime: &Runtime, args: &Value) -> Result<String, protoco
     if a.waiting_for_plan() {
         let _ = writeln!(out, "正在等新计划。");
     }
+    let _ = writeln!(
+        out,
+        "数据时刻：{}（绝对模拟分钟 {}）",
+        world.clock(),
+        world.minutes()
+    );
+    let _ = writeln!(
+        out,
+        "身体：{}",
+        serde_json::json!({
+            "fullness": a.needs.fullness.value,
+            "water": a.needs.water.value,
+            "energy": a.needs.energy.value,
+            "health": a.needs.health.value,
+            "physiology": a.needs.body,
+        })
+    );
+    if let Some(resident) = runtime.population.residents.get(&a.id) {
+        let _ = writeln!(out, "人设：{}", truncate(&resident.persona, 1000));
+    }
+    if let Some(session) = runtime.driver.runtime.session(&a.id) {
+        let _ = writeln!(
+            out,
+            "目标：{}",
+            truncate(&serde_json::json!(session.goals).to_string(), 3000)
+        );
+        let _ = writeln!(
+            out,
+            "长期记忆与笔记请用 query_data 查询 /agents/{}/memory 与 /agents/{}/notebook。",
+            a.id, a.id
+        );
+    }
+    let _ = writeln!(
+        out,
+        "以下为有限摘要；完整身体、计划和日记可用 query_data 查询 /world/actors/{}。",
+        a.id
+    );
     let _ = writeln!(out, "正在做：{}", a.current.verb);
     if !a.plan.is_empty() {
         let _ = writeln!(out, "接着计划：");
@@ -428,15 +496,21 @@ pub(crate) fn watch(runtime: &Runtime, args: &Value) -> String {
         .director_recent
         .iter()
         .rev()
+        .filter(|(at, _)| *at >= runtime.world.minutes() - minutes)
         .take(WATCH_ENTRIES)
         .collect::<Vec<_>>();
     let mut out = format!(
-        "最近 {} 分钟的动静（记录 {} 条）：\n",
+        "最近 {} 分钟的动静（返回最近 {} 条；仅本次进程的有限日志缓存，不保证覆盖整个时段；更早历史请用 query_data 查日记、记忆、交谈与玩法档案）：\n",
         minutes.round(),
         lines.len()
     );
     for (clock, text) in lines.into_iter().rev() {
-        let _ = writeln!(out, "- {clock} {}", truncate(text, 320));
+        let _ = writeln!(
+            out,
+            "- {} {}",
+            kernel::clock_string(*clock),
+            truncate(text, 320)
+        );
     }
     out
 }
