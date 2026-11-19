@@ -146,7 +146,8 @@ test('survival10 personas, worldview and furnishings survive opening, reload and
       assert.ok(
         pantries.every(
           (prop) =>
-            prop.storage_slots === 0 && prop.actions.every((action) => action.remaining === 0)
+            prop.storage_slots === 0 &&
+            prop.actions.some((action) => action.id === 'ledger' && action.remaining === 1)
         )
       )
       for (const instance of prefab.furnish.place)

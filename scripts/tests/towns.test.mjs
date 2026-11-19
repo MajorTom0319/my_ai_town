@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
 import { createManager } from '../town-manager.mjs'
 import { worldQuery } from '../towns/hosts.mjs'
 import { seal } from '../mapgen/document.mjs'
@@ -96,6 +97,8 @@ test('preview/save/open/reopen/reset/isolation work with actual hosts and persis
     assert.deepEqual(savedMap.layout, draft.document.layout)
     const [a, aa] = await Promise.all([api(`/${saved.id}/open`, {}), api(`/${saved.id}/open`, {})])
     assert.equal(a.endpoint, aa.endpoint)
+    assert.equal(new URL(a.endpoint).host, new URL(base).host)
+    assert.equal(new URL(a.endpoint).pathname, `/api/towns/${saved.id}/socket`)
     // 一句话建镇的说明和小镇存在一起：列表简介是玩家那句话，进镇时带着世界观建议和适合住进来的人
     assert.equal(a.creation.worldview, '这里的人想靠海吃饭。')
     const listed = (await api('')).towns.find((town) => town.id === saved.id)
@@ -275,6 +278,100 @@ test('preview/save/open/reopen/reset/isolation work with actual hosts and persis
     assert.equal(await fs.readFile(path.join(retired, 'world.json'), 'utf8'), oldSave)
   } finally {
     await m?.stop()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('LAN sharing is opt-in and checks the authority and origin for both API and world upgrades', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'town-lan-test-'))
+  const hostname =
+    Object.values(os.networkInterfaces())
+      .flat()
+      .find((address) => address.family === 'IPv4' && !address.internal)?.address ?? 'localhost'
+  let manager
+  try {
+    manager = await createManager({ root, port: 0, mockLlm: true, lan: false })
+    assert.equal(manager.server.address().address, '127.0.0.1')
+    const local = `http://127.0.0.1:${manager.server.address().port}`
+    const forbidden = await new Promise((resolve, reject) => {
+      http
+        .get(local + '/api/towns/health', { headers: { host: '192.0.2.10' } }, (response) => {
+          response.resume()
+          resolve(response.statusCode)
+        })
+        .once('error', reject)
+    })
+    assert.equal(forbidden, 403)
+    await manager.stop()
+    manager = undefined
+    await assert.rejects(
+      createManager({ root, port: 0, lan: true, lanHosts: [] }),
+      /TOWN_LAN_HOSTS/
+    )
+    manager = await createManager({ root, port: 0, mockLlm: true, lan: true, lanHosts: [hostname] })
+    const base = `http://${hostname}:${manager.server.address().port}`
+    assert.equal((await fetch(base + '/')).status, 200)
+    assert.equal(
+      (
+        await fetch(base + '/api/towns/health', {
+          headers: { origin: 'http://untrusted.example' },
+        })
+      ).status,
+      403
+    )
+    const opened = await fetch(base + '/api/towns/default-town/open', {
+      method: 'POST',
+      headers: { origin: base, 'content-type': 'application/json', 'x-town-client': '1' },
+      body: '{}',
+    })
+    assert.equal(opened.status, 200)
+    const town = await opened.json()
+    assert.equal(new URL(town.endpoint).host, new URL(base).host)
+    const identity = await worldQuery(
+      town.endpoint,
+      null,
+      (message) => message.type === 'world_identity'
+    )
+    assert.equal(identity.town_id, town.id)
+    const upgrade = (origin) =>
+      new Promise((resolve, reject) => {
+        const request = http.get(town.endpoint.replace(/^ws:/, 'http:'), {
+          headers: {
+            origin,
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+          },
+        })
+        request.once('error', reject)
+        request.once('response', (response) => {
+          response.resume()
+          resolve(response.statusCode)
+        })
+        request.once('upgrade', (response, socket) => {
+          socket.destroy()
+          resolve(response.statusCode)
+        })
+      })
+    assert.equal(await upgrade('http://untrusted.example'), 403)
+    assert.equal(await upgrade(base), 101)
+    await assert.rejects(
+      worldQuery(
+        town.endpoint.replace(/session=.*/, 'session=incorrect'),
+        null,
+        (message) => message.type === 'world_identity'
+      ),
+      /无法连接|已断开/
+    )
+    await manager.stop()
+    manager = undefined
+    await assert.rejects(
+      worldQuery(town.endpoint, null, (message) => message.type === 'world_identity'),
+      /无法连接|已断开/
+    )
+  } finally {
+    await manager?.stop()
     await fs.rm(root, { recursive: true, force: true })
   }
 })

@@ -64,6 +64,12 @@ export class Hosts {
     const record = this.running.get(id)
     return Boolean(record && alive(record.child))
   }
+  connection(id, token) {
+    const record = this.running.get(id)
+    return record && !record.closing && alive(record.child) && token === record.token
+      ? record.endpoint
+      : null
+  }
   /** 同时运行的小镇已经跑满（正在启动的也算） */
   full() {
     const live = [...this.running].filter(([, r]) => alive(r.child) && !r.closing).map(([id]) => id)

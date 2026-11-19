@@ -141,7 +141,10 @@ export function createConnection(
 
   function connect() {
     if (stopped) return
-    ws = new WebSocket(endpoint)
+    const address = new URL(endpoint, window.location.href)
+    if (address.protocol === 'http:') address.protocol = 'ws:'
+    if (address.protocol === 'https:') address.protocol = 'wss:'
+    ws = new WebSocket(address.href)
     verified = !identity
     ws.onopen = () => {
       if (verified) joined()

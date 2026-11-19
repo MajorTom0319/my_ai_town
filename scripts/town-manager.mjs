@@ -10,6 +10,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Storage, readJson, atomicJson, dataRoot, setupConfig } from './towns/storage.mjs'
 import { Hosts } from './towns/hosts.mjs'
+import { createConnections, requestAccess } from './towns/connections.mjs'
 const source = fileURLToPath(new URL('../', import.meta.url))
 
 // 一个数据目录只允许一个管理服务；上一个进程已退出时接管它留下的锁。
@@ -43,7 +44,14 @@ export async function createManager({
   port = Number(process.env.TOWN_MANAGER_PORT ?? 8788),
   mockLlm = false,
   maxRunning,
+  lan = process.env.TOWN_LAN === '1',
+  lanHosts = (process.env.TOWN_LAN_HOSTS ?? '')
+    .split(',')
+    .map((host) => host.trim())
+    .filter(Boolean),
+  listenHost = lan ? '0.0.0.0' : '127.0.0.1',
 } = {}) {
+  const validateRequest = requestAccess({ lan, lanHosts })
   const storage = new Storage(root, source)
   await storage.init()
   const releaseLock = await acquireLock(root)
@@ -88,8 +96,7 @@ export async function createManager({
   ]
   async function dispatch(req, signal) {
     if (stopping) throw new HttpError(503, '应用正在退出')
-    if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.host ?? ''))
-      throw new HttpError(403, '仅提供本机服务')
+    validateRequest(req)
     const url = new URL(req.url, 'http://127.0.0.1'),
       route = url.pathname.replace(/\/$/, '')
     const found = routes.find(([method, pattern]) => method === req.method && pattern.test(route))
@@ -128,19 +135,23 @@ export async function createManager({
     }
   })
   server.requestTimeout = 120000
+  const connections = createConnections({ hosts, validateRequest })
+  server.on('upgrade', connections.upgrade)
   try {
     await new Promise((resolve, reject) => {
       server.once('error', reject)
-      server.listen(port, '127.0.0.1', resolve)
+      server.listen(port, listenHost, resolve)
     })
   } catch (e) {
     await releaseLock()
     throw e
   }
-  console.log(`[town-manager] http://127.0.0.1:${server.address().port} · ${root}`)
+  console.log(`[town-manager] http://${listenHost}:${server.address().port} · ${root}`)
+  if (lan) console.log(`[town-manager] 局域网共享管理权限 · 允许地址：${lanHosts.join(', ')}`)
   async function stop() {
     if (stopping) return
     stopping = true
+    connections.stop()
     for (const c of active) c.abort()
     builtinModel.stop()
     try {

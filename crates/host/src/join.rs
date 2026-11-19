@@ -386,11 +386,11 @@ impl Runtime {
         };
         // 之前积压的世界日志先发出去，安置产生的日志成功后才发布。
         let earlier = self.world.take_events();
-        self.driver.dispatch(&self.world, earlier, clients);
+        self.dispatch_world_events(earlier, clients);
         match self.transact(|rt| rt.admit(&plan, &req, print)) {
             Ok(outcome) => {
                 let placed = self.world.take_events();
-                self.driver.dispatch(&self.world, placed, clients);
+                self.dispatch_world_events(placed, clients);
                 println!("[host] {}", outcome.message);
                 Outcome::none()
                     .and_all(ServerMsg::ResidentJoined { outcome })

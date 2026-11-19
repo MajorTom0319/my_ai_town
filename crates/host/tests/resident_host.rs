@@ -171,6 +171,7 @@ fn sessions_resume_in_the_formal_host_without_repeating_actions() {
     let endpoint = Endpoint::start();
     let mut town = town(&endpoint.url);
     let mut ws = town.start();
+    text_only_world(&mut ws);
     let id = join_first(&mut ws);
     assert_eq!(id, "resident_001");
     let configured = reply(
@@ -363,6 +364,7 @@ fn residents_without_a_model_wait_until_one_is_chosen() {
         }),
     );
     let mut ws = town.start();
+    text_only_world(&mut ws);
     let id = join_id(&mut ws, "tpl_a");
 
     speed(&mut ws, 20.0);

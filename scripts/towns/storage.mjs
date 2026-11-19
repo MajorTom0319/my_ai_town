@@ -1,10 +1,16 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import os from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { checkIdentity } from '../mapgen/document.mjs'
 export const readJson = async (p) => JSON.parse(await fs.readFile(p, 'utf8'))
 const BUILTIN_MAP = 'data/maps/2d-town/map.json'
+// 本工作区默认把运行数据放在仓库根的 .local/town-data；用 AI_TOWN_HOME 可指向别处。
+// 这是开发启动的固定位置；ios 等不需要 Node 管理服务的构建不受影响。
+const WORKSPACE_DATA = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../.local/town-data'
+)
 // 旧 3D 地图仍留在用户目录；列表隐藏，直接打开也拒绝，避免误当 HD-2D 运行。
 export function supportsHd2d(document) {
   return (
@@ -38,15 +44,7 @@ export async function atomicJson(file, value, mode = 0o600) {
   }
 }
 export function dataRoot() {
-  return path.resolve(
-    process.env.AI_TOWN_HOME ??
-      (process.platform === 'darwin'
-        ? path.join(os.homedir(), 'Library/Application Support/MyAiTown')
-        : path.join(
-            process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local/share'),
-            'my-ai-town'
-          ))
-  )
+  return path.resolve(process.env.AI_TOWN_HOME ?? WORKSPACE_DATA)
 }
 /**
  * 一句话建镇时的描述、世界观建议和推荐的居民，和小镇放在一起（creation.json）：换设备、换成 mac 版

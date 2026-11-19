@@ -38,7 +38,7 @@ export function createTownRoutes({ source, storage, hosts, serial }) {
     [
       'POST',
       /^\/api\/towns\/([a-z0-9-]+)\/open$/,
-      async ({ params: [id], body }) => {
+      async ({ params: [id], body, headers }) => {
         // 页面断线后自动重开（automatic）：这个小镇是被另一个页面进的小镇挤掉的、那个还开着，
         // 就不抢回来，告诉页面原因，由玩家自己决定回不回来；不然两个页面会来回互相挤
         const by = displaced.get(id)
@@ -56,7 +56,9 @@ export function createTownRoutes({ source, storage, hosts, serial }) {
             await inTown(oldest, () => hosts.close(oldest))
           }
           displaced.delete(id)
-          return await inTown(id, () => hosts.open(id))
+          const entry = await inTown(id, () => hosts.open(id))
+          entry.endpoint = `ws://${headers.host}/api/towns/${id}/socket${new URL(entry.endpoint).search}`
+          return entry
         } finally {
           claiming.delete(id)
         }
